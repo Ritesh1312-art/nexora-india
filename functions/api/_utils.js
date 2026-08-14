@@ -1,6 +1,11 @@
 export const json=(data,status=200,extra={})=>new Response(JSON.stringify(data),{status,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store",...(extra.headers||{})}});
 export async function readBody(req){try{return await req.json()}catch{return {}}}
-export async function supabase(env,path,opts={}){const headers={"apikey":env.SUPABASE_SERVICE_ROLE_KEY,"Authorization":`Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,"Content-Type":"application/json","Prefer":"return=representation",...(opts.headers||{})};return fetch(`${env.SUPABASE_URL}/rest/v1/${path}`,{...opts,headers});}
+export async function supabase(env,path,opts={}){
+ if(!env.SUPABASE_URL)return new Response(JSON.stringify({error:"SUPABASE_URL is not configured"}),{status:500,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});
+ if(!env.SUPABASE_SERVICE_ROLE_KEY)return new Response(JSON.stringify({error:"SUPABASE_SERVICE_ROLE_KEY is not configured"}),{status:500,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});
+ const headers={"apikey":env.SUPABASE_SERVICE_ROLE_KEY,"Authorization":`Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,"Content-Type":"application/json","Prefer":"return=representation",...(opts.headers||{})};
+ return fetch(`${env.SUPABASE_URL}/rest/v1/${path}`,{...opts,headers});
+}
 export function b64u(bytes){let s="";if(typeof bytes==="string")s=bytes;else s=String.fromCharCode(...new Uint8Array(bytes));return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
 export function unb64u(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return atob(s)}
 export async function signAdmin(env){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.JWT_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);const payload=b64u(new TextEncoder().encode(JSON.stringify({sub:"admin",iat:Date.now(),exp:Date.now()+8*60*60*1000})));const sig=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(payload));return `${payload}.${b64u(sig)}`}
