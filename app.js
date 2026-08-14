@@ -98,7 +98,7 @@ async function adminDashboard(){
     $("#app").innerHTML=layout("Nexora-India Admin",`<div class="admin-grid">
       <div class="stat"><span>Products</span><b>${stats.products}</b></div><div class="stat"><span>Users</span><b>${stats.users}</b></div><div class="stat"><span>Orders</span><b>${stats.orders}</b></div><div class="stat"><span>Sales</span><b>${money(stats.sales)}</b></div>
     </div>
-    <div class="tabs" style="margin-top:15px"><button class="btn" onclick="adminTab('products')">Products</button><button class="btn secondary" onclick="adminTab('orders')">Orders</button><button class="btn secondary" onclick="adminTab('users')">Users</button><button class="btn secondary" onclick="adminTab('offers')">Offers</button><button class="btn secondary" onclick="cjSync()">CJ Sync</button><button class="btn secondary" onclick="adminLogout()">Logout</button></div>
+    <div class="tabs" style="margin-top:15px"><button class="btn" onclick="adminTab('products')">Products</button><button class="btn secondary" onclick="adminTab('orders')">Orders</button><button class="btn secondary" onclick="adminTab('users')">Users</button><button class="btn secondary" onclick="adminTab('offers')">Offers</button><button class="btn secondary" onclick="cjSync()">CJ Sync</button><button class="btn secondary" onclick="deodapSync()">DeoDap Sync</button><button class="btn secondary" onclick="adminLogout()">Logout</button></div>
     <div id="adminTab"></div>`);
     window._adminData={ps:ps||[],users:users||[],orders:orders||[],offers:offers||[]};adminTab("products");
   }catch(e){admin=false;$("#app").innerHTML=layout("Admin",`<div class="notice error">${esc(e.message)}</div>`)}
@@ -111,7 +111,8 @@ window.editProduct=async id=>{const p=window._adminData.ps.find(x=>x.id===id);$(
 window.saveProduct=async id=>{await adminCall("update_product",{id,price:Number($("#price").value),stock:Number($("#stock").value),active:$("#live").checked,approved_by_admin:$("#live").checked});adminDashboard()};
 window.verifyOrder=async id=>{const status=prompt("Payment status: VERIFIED or REJECTED","VERIFIED");if(!status)return;await adminCall("verify_payment",{order_id:id,status});adminDashboard()};
 window.createOffer=async()=>{await adminCall("create_offer",{name:$("#oname").value,code:$("#ocode").value||null,discount_percent:Number($("#odisc").value||0)});adminDashboard()};
-window.cjSync=async()=>{try{const d=await adminCall("cj_sync");alert(`CJ sync complete. Imported/updated: ${d.imported||0}`);adminDashboard()}catch(e){alert(e.message)}};
+window.cjSync=async()=>{try{const d=await adminCall("cj_sync");alert(`CJ sync complete.\nFootwear: ${d.footwear||0}\nKitchen Appliances: ${d.kitchen||0}`);adminDashboard()}catch(e){alert(e.message)}};
+window.deodapSync=async()=>{try{const d=await adminCall("deodap_sync");alert(`DeoDap sync complete.\nDaily Use: ${d.daily||0}\nArtificial Jewellery: ${d.jewellery||0}`);adminDashboard()}catch(e){alert(e.message)}};
 window.adminLogout=async()=>{await adminCall("logout");admin=false;location.hash="#/admin";renderAdmin()};
 
 init();
