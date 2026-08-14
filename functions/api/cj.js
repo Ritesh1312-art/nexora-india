@@ -1,18 +1,21 @@
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 
 async function getAccessToken(env) {
-  if (env.CJ_ACCESS_TOKEN) return env.CJ_ACCESS_TOKEN;
-  if (!env.CJ_API_KEY) throw new Error("CJ_API_KEY is not configured");
-  const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey: env.CJ_API_KEY })
-  });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok || d.code !== 200 || !d.data?.accessToken) {
-    throw new Error(`CJ authentication failed: ${JSON.stringify(d)}`);
+  // Prefer the newly-created API key. CJ caches the returned token for 24h.
+  if (env.CJ_API_KEY) {
+    const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: env.CJ_API_KEY })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.code !== 200 || !d.data?.accessToken) {
+      throw new Error(`CJ authentication failed: ${JSON.stringify(d)}`);
+    }
+    return d.data.accessToken;
   }
-  return d.data.accessToken;
+  if (env.CJ_ACCESS_TOKEN) return env.CJ_ACCESS_TOKEN;
+  throw new Error("CJ_API_KEY is not configured");
 }
 
 function categoryId(categories, aliases) {
