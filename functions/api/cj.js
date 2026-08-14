@@ -1,20 +1,22 @@
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 
 async function getAccessToken(env) {
-  // Prefer the newly-created API key. CJ caches the returned token for 24h.
-  if (env.CJ_API_KEY) {
+  const apiKey = String(env.CJ_API_KEY || "").trim();
+  if (apiKey) {
     const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: env.CJ_API_KEY })
+      body: JSON.stringify({ apiKey })
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok || d.code !== 200 || !d.data?.accessToken) {
-      throw new Error(`CJ authentication failed: ${JSON.stringify(d)}`);
+      const msg = String(d.message || "Invalid CJ API key");
+      throw new Error(`CJ authentication failed: ${msg}. Check that Cloudflare CJ_API_KEY contains the full active API Key copied from CJ, not an access token.`);
     }
     return d.data.accessToken;
   }
-  if (env.CJ_ACCESS_TOKEN) return env.CJ_ACCESS_TOKEN;
+  const accessToken = String(env.CJ_ACCESS_TOKEN || "").trim();
+  if (accessToken) return accessToken;
   throw new Error("CJ_API_KEY is not configured");
 }
 
@@ -48,7 +50,7 @@ async function searchProducts(token, keyword) {
   u.searchParams.set("features", "enable_category");
   const r = await fetch(u, { headers: { "CJ-Access-Token": token } });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok || d.code !== 200) throw new Error(`CJ product query failed for ${keyword}: ${JSON.stringify(d)}`);
+  if (!r.ok || d.code !== 200) throw new Error(`CJ product query failed for ${keyword}: ${String(d.message || JSON.stringify(d))}`);
   return (d.data?.content || []).flatMap(x => x.productList || []);
 }
 
