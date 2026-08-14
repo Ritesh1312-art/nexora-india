@@ -1,8 +1,13 @@
 import {json,readBody,supabase,signAdmin,validAdmin,telegram} from "./_utils.js";
 export async function onRequestPost({request,env}){
  const b=await readBody(request);
- if(b.action==="login"){if(!env.ADMIN_PASSWORD||!env.JWT_SECRET)return json({error:"Admin secrets are not configured"},500);if(b.password!==env.ADMIN_PASSWORD)return json({error:"Invalid password"},401);const t=await signAdmin(env);return json({ok:true},{headers:{"Set-Cookie":`nexora_admin=${t}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`}})}
- if(b.action==="logout")return json({ok:true},{headers:{"Set-Cookie":"nexora_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"}});
+ if(b.action==="login"){
+  if(!env.ADMIN_PASSWORD||!env.JWT_SECRET)return json({error:"Admin secrets are not configured"},500);
+  if(b.password!==env.ADMIN_PASSWORD)return json({error:"Invalid password"},401);
+  const t=await signAdmin(env);
+  return json({ok:true},200,{headers:{"Set-Cookie":`nexora_admin=${t}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`}});
+ }
+ if(b.action==="logout")return json({ok:true},200,{headers:{"Set-Cookie":"nexora_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"}});
  if(!(await validAdmin(request,env)))return json({error:"Admin login required"},401);
  if(b.action==="stats"){
   const [p,u,o]=await Promise.all([supabase(env,"products?select=id"),supabase(env,"profiles?select=id"),supabase(env,"orders?select=id,total_amount")]);
@@ -23,17 +28,13 @@ export async function onRequestPost({request,env}){
   const list=[];for(const block of (d.data?.content||[]))for(const p of (block.productList||[]))list.push(p);
   let imported=0;
   for(const p of list){
-   const id=p.id||p.productId; if(!id)continue;
+   const id=p.id||p.productId;if(!id)continue;
    const name=p.nameEn||p.productNameEn||"CJ Product";const cost=Number(p.sellPrice||p.nowPrice||0)||0;
    const payload={name,source:"CJ",source_product_id:String(id),source_sku:p.sku||p.spu||null,image_url:p.bigImage||null,cost_price:cost,suggested_price:Number((cost*1.5).toFixed(2)),selling_price:Number((cost*1.5).toFixed(2)),stock:0,stock_mode:"AUTO",active:false,approved_by_admin:false,last_stock_sync_at:new Date().toISOString()};
-   const q=await supabase(env,`products?source=eq.CJ&source_product_id=eq.${encodeURIComponent(String(id))}&select=id`);
-   const ex=await q.json();
-   if(ex?.[0])await supabase(env,`products?id=eq.${encodeURIComponent(ex[0].id)}`,{method:"PATCH",body:JSON.stringify(payload)});
-   else await supabase(env,"products",{method:"POST",body:JSON.stringify(payload)});
-   imported++;
+   const q=await supabase(env,`products?source=eq.CJ&source_product_id=eq.${encodeURIComponent(String(id))}&select=id`);const ex=await q.json();
+   if(ex?.[0])await supabase(env,`products?id=eq.${encodeURIComponent(ex[0].id)}`,{method:"PATCH",body:JSON.stringify(payload)});else await supabase(env,"products",{method:"POST",body:JSON.stringify(payload)});imported++;
   }
-  await telegram(env,`🔄 Nexora-India CJ sync complete\nImported/updated: ${imported}`);
-  return json({ok:true,imported});
+  await telegram(env,`🔄 Nexora-India CJ sync complete\nImported/updated: ${imported}`);return json({ok:true,imported});
  }
  return json({error:"Unknown admin action"},400);
 }
