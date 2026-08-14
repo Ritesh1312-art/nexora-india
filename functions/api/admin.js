@@ -1,4 +1,6 @@
 import {json,readBody,supabase,signAdmin,validAdmin,telegram,getSupabaseKey} from "./_utils.js";
+import {syncCJ} from "./cj.js";
+import {syncDeodap} from "./deodap.js";
 async function readSupabaseResult(r){const text=await r.text();let data;try{data=JSON.parse(text)}catch{data=text}return {ok:r.ok,status:r.status,data};}
 export async function onRequestPost({request,env}){
  try{
@@ -34,13 +36,12 @@ export async function onRequestPost({request,env}){
   if(b.action==="verify_payment"){const status=String(b.status||"").toUpperCase();if(!["VERIFIED","REJECTED"].includes(status))return json({error:"Invalid status"},400);const payment_status=status==="VERIFIED"?"VERIFIED":"REJECTED";const order_status=status==="VERIFIED"?"PAID":"PENDING_PAYMENT";const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status})});if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);await telegram(env,`💳 NEXORA-INDIA PAYMENT ${status}\nOrder: ${b.order_id}`);return json({ok:true})}
   if(b.action==="create_offer"){const r=await supabase(env,"offers",{method:"POST",body:JSON.stringify({name:b.name,code:b.code||null,offer_type:"PERCENTAGE",target_type:"ALL",discount_percent:Number(b.discount_percent||0),active:true,admin_approved:true})});if(!r.ok)return json({error:"Offer creation failed",details:await r.text()},500);return json({ok:true})}
   if(b.action==="cj_sync"){
-   if(!env.CJ_ACCESS_TOKEN)return json({error:"CJ_ACCESS_TOKEN is not configured"},400);
-   const r=await fetch("https://developers.cjdropshipping.com/api2.0/v1/product/listV2?page=1&size=100",{headers:{"CJ-Access-Token":env.CJ_ACCESS_TOKEN}});
-   const d=await r.json();if(!r.ok||d.code!==200)return json({error:"CJ API error",details:d},502);
-   const list=[];for(const block of (d.data?.content||[]))for(const p of (block.productList||[]))list.push(p);
-   let imported=0;
-   for(const p of list){const id=p.id||p.productId;if(!id)continue;const name=p.nameEn||p.productNameEn||"CJ Product";const cost=Number(p.sellPrice||p.nowPrice||0)||0;const payload={name,source:"CJ",source_product_id:String(id),source_sku:p.sku||p.spu||null,image_url:p.bigImage||null,cost_price:cost,suggested_price:Number((cost*1.5).toFixed(2)),selling_price:Number((cost*1.5).toFixed(2)),stock:0,stock_mode:"AUTO",active:false,approved_by_admin:false,last_stock_sync_at:new Date().toISOString()};const q=await supabase(env,`products?source=eq.CJ&source_product_id=eq.${encodeURIComponent(String(id))}&select=id`);const ex=await q.json();if(ex?.[0])await supabase(env,`products?id=eq.${encodeURIComponent(ex[0].id)}`,{method:"PATCH",body:JSON.stringify(payload)});else await supabase(env,"products",{method:"POST",body:JSON.stringify(payload)});imported++}
-   await telegram(env,`🔄 Nexora-India CJ sync complete\nImported/updated: ${imported}`);return json({ok:true,imported});
+   try{const result=await syncCJ(env,supabase);await telegram(env,`🔄 Nexora-India CJ sync complete\nFootwear: ${result.footwear}\nKitchen Appliances: ${result.kitchen}`);return json({ok:true,...result});}
+   catch(e){return json({error:"CJ sync failed",details:String(e?.message||e)},502)}
+  }
+  if(b.action==="deodap_sync"){
+   try{const result=await syncDeodap(env,supabase);await telegram(env,`🔄 Nexora-India DeoDap sync complete\nDaily Use: ${result.daily}\nArtificial Jewellery: ${result.jewellery}`);return json({ok:true,...result});}
+   catch(e){return json({error:"DeoDap sync failed",details:String(e?.message||e)},502)}
   }
   return json({error:"Unknown admin action"},400);
  }catch(e){return json({error:"Admin API internal error",details:String(e?.message||e)},500)}
