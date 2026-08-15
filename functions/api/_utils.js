@@ -5,7 +5,7 @@ export async function supabase(env,path,opts={}){
  const key=getSupabaseKey(env);
  if(!env.SUPABASE_URL)return new Response(JSON.stringify({error:"SUPABASE_URL is not configured"}),{status:500,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});
  if(!key)return new Response(JSON.stringify({error:"SUPABASE_SECRET_KEY is not configured"}),{status:500,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});
- const headers={"apikey":key,"Content-Type":"application/json","Prefer":"return=representation",...(opts.headers||{})};
+ const headers={"apikey":key,"Authorization":`Bearer ${key}`,"Content-Type":"application/json","Prefer":"return=representation",...(opts.headers||{})};
  return fetch(`${env.SUPABASE_URL}/rest/v1/${path}`,{...opts,headers});
 }
 export function b64u(bytes){let s="";if(typeof bytes==="string")s=bytes;else s=String.fromCharCode(...new Uint8Array(bytes));return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
