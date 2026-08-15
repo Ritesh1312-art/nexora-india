@@ -86,6 +86,13 @@ async function upsertBatch(env, supabase, rows) {
   }
 }
 
+async function getLiveProductIds(env, supabase) {
+  const r = await supabase(env, "products?select=source_product_id&source=eq.DEODAP&active=eq.true");
+  const d = await r.json().catch(() => null);
+  if (!r.ok || !Array.isArray(d)) throw new Error(`Could not load live DeoDap products before sync: ${JSON.stringify(d)}`);
+  return new Set(d.map(x => String(x.source_product_id || "")).filter(Boolean));
+}
+
 export async function syncDeodap(env, supabase) {
   const catRes = await supabase(env, "categories?select=id,name&active=eq.true");
   const categories = await catRes.json();
@@ -97,6 +104,7 @@ export async function syncDeodap(env, supabase) {
     throw new Error(`DeoDap category mapping missing. Need Daily Use Products and Artificial Jewellery. Found: ${categories.map(c => c.name).join(", ")}`);
   }
 
+  const liveIds = await getLiveProductIds(env, supabase);
   const dailyHandles = String(env.DEODAP_DAILY_COLLECTIONS || DEFAULT_DAILY_COLLECTIONS.join(","))
     .split(",").map(x => x.trim()).filter(Boolean);
   const jewelleryHandles = String(env.DEODAP_JEWELLERY_COLLECTIONS || JEWELLERY_COLLECTIONS.join(","))
@@ -112,8 +120,8 @@ export async function syncDeodap(env, supabase) {
   }
 
   const rows = { jewellery: [], daily: [] };
-  const seen = new Set();
-  const MAX_PER_CATEGORY = 20;
+  const seen = new Set(liveIds);
+  const MAX_PER_CATEGORY = 40;
 
   for (const p of allJewellery) {
     if (rows.jewellery.length >= MAX_PER_CATEGORY) break;
@@ -136,6 +144,6 @@ export async function syncDeodap(env, supabase) {
 
   await upsertBatch(env, supabase, [...rows.jewellery, ...rows.daily]);
   const imported = rows.daily.length + rows.jewellery.length;
-  if (!imported) throw new Error("No DeoDap products were returned. Check the public collection availability or configure DEODAP_DAILY_COLLECTIONS / DEODAP_JEWELLERY_COLLECTIONS in Cloudflare.");
+  if (!imported) throw new Error("No new DeoDap products were returned. Existing live products are excluded from future syncs.");
   return { daily: rows.daily.length, jewellery: rows.jewellery.length, imported };
 }
