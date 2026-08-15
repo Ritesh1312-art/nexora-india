@@ -5,7 +5,7 @@ async function requestTokenFromApiKey(apiKey){
   const d=await r.json().catch(()=>({}));
   if(r.ok&&d.code===200&&d.data?.accessToken)return {accessToken:d.data.accessToken,refreshToken:d.data.refreshToken||null};
   const code=d.code!=null?`code ${d.code}`:`HTTP ${r.status}`;
-  throw new Error(`CJ API-key authentication failed (${code}): ${String(d.message||JSON.stringify(d))}`);
+  const e=new Error(`CJ API-key authentication failed (${code}): ${String(d.message||JSON.stringify(d))}`);e.cjCode=d.code;e.requestId=d.requestId;throw e;
 }
 
 async function logoutToken(token){
@@ -13,30 +13,34 @@ async function logoutToken(token){
   try{await fetch(`${CJ_BASE}/authentication/logout`,{method:"POST",headers:{"CJ-Access-Token":token}});}catch{}
 }
 
+async function refreshToken(refreshToken){
+  const r=await fetch(`${CJ_BASE}/authentication/refreshAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({refreshToken})});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok&&d.code===200&&d.data?.accessToken)return d.data.accessToken;
+  return null;
+}
+
 async function getAccessToken(env,forceNew=false){
   const configuredKey=String(env.CJ_API_KEY||"").trim();
   const configuredAccess=String(env.CJ_ACCESS_TOKEN||"").trim();
   const configuredRefresh=String(env.CJ_REFRESH_TOKEN||"").trim();
 
+  // The API Key is the source of truth. Always try it first when present so an
+  // old/expired refresh token cannot silently override a newly configured key.
+  if(configuredKey){
+    try{return (await requestTokenFromApiKey(configuredKey)).accessToken;}catch(e){
+      if(!configuredRefresh&&!configuredAccess)throw e;
+    }
+  }
+
   if(!forceNew&&configuredRefresh){
-    const r=await fetch(`${CJ_BASE}/authentication/refreshAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({refreshToken:configuredRefresh})});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok&&d.code===200&&d.data?.accessToken)return d.data.accessToken;
+    const token=await refreshToken(configuredRefresh);
+    if(token)return token;
   }
 
-  if(configuredKey&&configuredKey.includes("@api@")){
-    const d=await requestTokenFromApiKey(configuredKey);
-    return d.accessToken;
-  }
-
-  // If CJ_API_KEY is configured without the documented API-key shape, do not
-  // silently treat it as a token. That made the previous integration very hard
-  // to diagnose and can produce CJ error 1600001.
-  if(configuredKey&&!configuredKey.includes("@api@")&&!configuredAccess){
-    throw new Error("CJ_API_KEY does not look like a CJ API Key. CJ's documented API Key format contains '@api@'. Copy the full API Key from CJ → Apps/API → API Key.");
-  }
   if(configuredAccess)return configuredAccess;
-  throw new Error("CJ credentials are missing. Configure CJ_API_KEY with the active CJ API Key (format contains @api@), or CJ_ACCESS_TOKEN as a fallback.");
+  if(configuredKey)throw new Error("CJ API-key authentication failed. The configured CJ_API_KEY was sent directly to CJ and CJ rejected it. Make sure Cloudflare Production has the full API Key copied with the CJ API page Copy icon and that the API entry is Activated.");
+  throw new Error("CJ credentials are missing. Configure CJ_API_KEY with the active CJ API Key, or CJ_ACCESS_TOKEN as a fallback.");
 }
 
 function categoryId(categories,aliases){const wanted=aliases.map(x=>x.toLowerCase());return categories.find(c=>wanted.includes(String(c.name||"").trim().toLowerCase()))?.id||null;}
@@ -87,14 +91,13 @@ export async function syncCJ(env,supabase){
  let rows;
  try{rows=await runQueries(token);}catch(e){
   if(Number(e?.cjCode)!==1600001)throw e;
-  // CJ documents 1600001 as invalid API key/access token. Force the old token
-  // out, then obtain a fresh token from the API key before retrying once.
+  // A product call rejected the token. Re-authenticate once using the full API key.
   const key=String(env.CJ_API_KEY||"").trim();
-  if(!key.includes("@api@"))throw new Error(`CJ returned 1600001 (invalid access token). CJ_API_KEY must be the full active API Key containing '@api@'; the current configuration does not match that format.`);
+  if(!key)throw new Error("CJ returned 1600001 (invalid access token) and no CJ_API_KEY is configured.");
   await logoutToken(token);
   token=(await requestTokenFromApiKey(key)).accessToken;
   try{rows=await runQueries(token);}catch(e2){
-   if(Number(e2?.cjCode)===1600001)throw new Error(`CJ still rejects the newly issued access token (1600001). The code is no longer a product-query bug: the CJ account/API key needs to be re-authorized or a new API Key generated in CJ. First request ID: ${e2.requestId||e.requestId||"n/a"}`);
+   if(Number(e2?.cjCode)===1600001)throw new Error(`CJ still rejects the newly issued access token (1600001). CJ rejected the API credential itself. Request ID: ${e2.requestId||e.requestId||"n/a"}`);
    throw e2;
   }
  }
