@@ -73,7 +73,14 @@ export async function onRequestPost({request,env}){
     if(!id)return json({error:"supplier_order_id is required"},400);
     try{return json({ok:true,...await submitCJ(env,supabase,id)});}catch(e){
       const msg=String(e?.message||e);
-      try{await supabase(env,`supplier_orders?id=eq.${encodeURIComponent(id)}`,{method:"PATCH",body:JSON.stringify({submission_attempts:1,last_submission_error:msg,updated_at:new Date().toISOString()})});}catch{}
+      try{
+        const current=await supabase(env,`supplier_orders?id=eq.${encodeURIComponent(id)}&select=submission_attempts`);
+        const rows=await current.json();
+        const attempts=Array.isArray(rows)&&rows[0]?Number(rows[0].submission_attempts||0)+1:1;
+        const retryable=attempts<5;
+        const delayMinutes=Math.min(60,5*Math.pow(2,Math.max(0,attempts-1)));
+        await supabase(env,`supplier_orders?id=eq.${encodeURIComponent(id)}`,{method:"PATCH",body:JSON.stringify({submission_attempts:attempts,last_submission_error:msg,retryable,next_retry_at:retryable?new Date(Date.now()+delayMinutes*60000).toISOString():null,updated_at:new Date().toISOString()})});
+      }catch{}
       return json({error:"CJ supplier submission failed",details:msg},502);
     }
   }catch(e){return json({error:"Supplier submission API internal error",details:String(e?.message||e)},500)}
