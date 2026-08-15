@@ -2,6 +2,42 @@ import {json,readBody,supabase,signAdmin,validAdmin,telegram,getSupabaseKey} fro
 import {syncCJ} from "./cj.js";
 import {syncDeodap} from "./deodap.js";
 async function readSupabaseResult(r){const text=await r.text();let data;try{data=JSON.parse(text)}catch{data=text}return {ok:r.ok,status:r.status,data};}
+
+async function prepareSupplierOrders(env,orderId){
+ const ir=await supabase(env,`order_items?order_id=eq.${encodeURIComponent(orderId)}&select=id,product_id,quantity,total_cost_price,product_name,sku`);
+ const items=await ir.json();
+ if(!ir.ok||!Array.isArray(items))throw new Error(`Unable to load order items for supplier routing: ${JSON.stringify(items)}`);
+ if(!items.length)return {created:0,manual:0};
+ const productIds=[...new Set(items.map(x=>x.product_id).filter(Boolean))];
+ const pr=await supabase(env,`products?id=in.(${productIds.map(encodeURIComponent).join(",")})&select=id,source,source_product_id,supplier_id`);
+ const products=await pr.json();
+ if(!pr.ok||!Array.isArray(products))throw new Error(`Unable to load product supplier mapping: ${JSON.stringify(products)}`);
+ const productMap=new Map(products.map(x=>[x.id,x]));
+ const groups=new Map(),manual=[];
+ for(const item of items){
+  const p=productMap.get(item.product_id);const source=String(p?.source||"MANUAL").toUpperCase();
+  if(source==="MANUAL"){manual.push(item);continue;}
+  const key=source;
+  if(!groups.has(key))groups.set(key,{supplier_id:p?.supplier_id||null,supplier_cost:0,items:[]});
+  const g=groups.get(key);g.supplier_cost+=Number(item.total_cost_price||0);g.items.push({order_item_id:item.id,product_id:item.product_id,source_product_id:p?.source_product_id||null,quantity:Number(item.quantity||1),product_name:item.product_name,sku:item.sku||null});
+ }
+ const existing=await supabase(env,`supplier_orders?order_id=eq.${encodeURIComponent(orderId)}&select=id`);const existingRows=await existing.json();
+ if(!existing.ok||!Array.isArray(existingRows))throw new Error(`Unable to check existing supplier orders: ${JSON.stringify(existingRows)}`);
+ if(existingRows.length)return {created:0,manual:manual.length,alreadyPrepared:true};
+ let created=0;
+ for(const [source,g] of groups){
+  const supplierQuery=g.supplier_id?`id=eq.${encodeURIComponent(g.supplier_id)}&select=id,name,api_enabled`: `source_type=eq.${encodeURIComponent(source)}&active=eq.true&select=id,name,api_enabled&limit=1`;
+  const sr=await supabase(env,`suppliers?${supplierQuery}`);const suppliers=await sr.json();
+  if(!sr.ok||!Array.isArray(suppliers)||!suppliers[0])throw new Error(`No active supplier configured for source ${source}`);
+  const supplier=suppliers[0];
+  const body={order_id:orderId,supplier_id:supplier.id,supplier_cost:Number(g.supplier_cost.toFixed(2)),status:"PENDING",supplier_notes:JSON.stringify({source,items:g.items,api_enabled:!!supplier.api_enabled})};
+  const r=await supabase(env,"supplier_orders",{method:"POST",body:JSON.stringify(body)});const data=await r.json().catch(()=>null);
+  if(!r.ok)throw new Error(`Supplier order preparation failed for ${source}: ${JSON.stringify(data)}`);
+  created++;
+ }
+ return {created,manual:manual.length};
+}
+
 export async function onRequestPost({request,env}) {
  try {
   const b=await readBody(request);
@@ -48,9 +84,17 @@ export async function onRequestPost({request,env}) {
   }
   if(b.action==="verify_payment"){
    const status=String(b.status||"").toUpperCase();if(!["VERIFIED","REJECTED"].includes(status))return json({error:"Invalid status"},400);
-   const payment_status=status==="VERIFIED"?"VERIFIED":"REJECTED",order_status=status==="VERIFIED"?"PAID":"PENDING_PAYMENT";
-   const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status})});
-   if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);await telegram(env,`💳 NEXORA-INDIA PAYMENT ${status}\nOrder: ${b.order_id}`);return json({ok:true});
+   const payment_status=status==="VERIFIED"?"VERIFIED":"REJECTED";
+   if(status==="VERIFIED"){
+    const prepared=await prepareSupplierOrders(env,b.order_id);
+    const order_status=prepared.created>0?"PROCESSING":"PAID";
+    const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status})});
+    if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);
+    await telegram(env,`💳 NEXORA-INDIA PAYMENT VERIFIED\nOrder: ${b.order_id}\nSupplier routes prepared: ${prepared.created}\nManual items: ${prepared.manual}`);
+    return json({ok:true,supplier_orders_prepared:prepared.created,manual_items:prepared.manual,order_status});
+   }
+   const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status:"PENDING_PAYMENT"})});
+   if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);await telegram(env,`💳 NEXORA-INDIA PAYMENT REJECTED\nOrder: ${b.order_id}`);return json({ok:true});
   }
   if(b.action==="create_offer"){
    const requested=String(b.target_type||"ALL").toUpperCase();
@@ -59,7 +103,6 @@ export async function onRequestPost({request,env}) {
    const name=String(b.name||"").trim(),code=String(b.code||"").trim()||null,discount=Number(b.discount_percent||0);
    if(!name)return json({error:"Offer name is required"},400);
    if(discount<=0||discount>100)return json({error:"Discount must be between 0 and 100"},400);
-
    let targetType=requested,targetIds=[];
    if(requested==="SELECTED_USERS"){
     targetIds=[...new Set((Array.isArray(b.target_user_ids)?b.target_user_ids:[]).map(String).filter(Boolean))];
@@ -74,7 +117,6 @@ export async function onRequestPost({request,env}) {
     targetType="SELECTED_USERS";targetIds=rows.map(x=>x.id);
     if(!targetIds.length)return json({error:`No ${requested==="ACTIVE_USERS"?"active":"inactive"} users found`},400);
    }
-
    const body={name,code,offer_type:"PERCENTAGE",target_type:targetType,discount_percent:discount,active:b.active!==false,admin_approved:true,starts_at:new Date().toISOString()};
    const r=await supabase(env,"offers",{method:"POST",body:JSON.stringify(body)});const offer=await r.json();
    if(!r.ok||!Array.isArray(offer)||!offer[0])return json({error:"Offer creation failed",details:offer},500);
