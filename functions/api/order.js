@@ -2,9 +2,9 @@ import {json,readBody,supabase,telegram} from "./_utils.js";
 import {validateOffer} from "./offer.js";
 
 async function releaseReservedStock(env,items){
-  try{
-    await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});
-  }catch{}
+  const response=await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});
+  if(!response.ok)throw new Error(`Reserved stock release failed: ${await response.text()}`);
+  return true;
 }
 
 export async function onRequestPost({request,env}) {
@@ -50,11 +50,14 @@ export async function onRequestPost({request,env}) {
 
   const orderBody={user_id:u.id,customer_name:c.name,customer_email:u.email||null,customer_phone:c.phone,address_line1:c.address_line1,address_line2:c.address_line2||null,city:c.city,state:c.state,pincode:c.pincode,landmark:c.landmark||null,subtotal,discount_amount:discount,shipping_amount:shipping,total_amount:total,estimated_supplier_cost:cost,estimated_profit:Number((total-cost).toFixed(2)),offer_id:offerId,offer_code:offerCode,payment_method:"UPI",payment_status:b.utr?"SUBMITTED":"PENDING",utr:b.utr||null,order_status:b.utr?"PAYMENT_SUBMITTED":"PENDING_PAYMENT",stock_reserved:true,stock_released:false};
   const or=await supabase(env,"orders",{method:"POST",body:JSON.stringify(orderBody)});const od=await or.json();
-  if(!or.ok){await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})));return json({error:od?.message||"Order creation failed"},500);}
+  if(!or.ok){
+    try{await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})))}catch(e){return json({error:"Order creation failed and reserved stock could not be released",details:String(e?.message||e)},500)}
+    return json({error:od?.message||"Order creation failed"},500);
+  }
   const order=od[0];
   const ir=await supabase(env,"order_items",{method:"POST",body:JSON.stringify(items.map(x=>({...x,order_id:order.id})))});
   if(!ir.ok){
-    await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})));
+    try{await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})))}catch(e){return json({error:"Order item save failed and reserved stock could not be released",details:String(e?.message||e)},500)}
     await supabase(env,`orders?id=eq.${encodeURIComponent(order.id)}`,{method:"DELETE"});
     return json({error:"Order created but item save failed"},500);
   }
