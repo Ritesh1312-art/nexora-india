@@ -1,9 +1,14 @@
 import {json,supabase,validAdmin} from "./_utils.js";
 
 const CJ_BASE="https://developers.cjdropshipping.com/api2.0/v1";
-async function token(env){if(env.CJ_ACCESS_TOKEN)return String(env.CJ_ACCESS_TOKEN).trim();if(!env.CJ_API_KEY)throw new Error("CJ credentials are not configured");const r=await fetch(`${CJ_BASE}/authentication/getAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apiKey:String(env.CJ_API_KEY).trim()})});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200||!d.data?.accessToken)throw new Error(`CJ authentication failed: ${String(d.message||JSON.stringify(d))}`);return d.data.accessToken;}
+async function token(env){
+ const key=String(env.CJ_API_KEY||"").trim();
+ if(key){const r=await fetch(`${CJ_BASE}/authentication/getAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apiKey:key})});const d=await r.json().catch(()=>({}));if(r.ok&&d.code===200&&d.data?.accessToken)return d.data.accessToken;}
+ const configured=String(env.CJ_ACCESS_TOKEN||"").trim();if(configured)return configured;
+ throw new Error("CJ credentials are not configured");
+}
 async function getOrder(t,id){const r=await fetch(`${CJ_BASE}/shopping/order/getOrderDetail?orderId=${encodeURIComponent(id)}`,{headers:{"CJ-Access-Token":t}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200)throw new Error(`CJ order lookup failed (${d.code||r.status}): ${String(d.message||JSON.stringify(d))}`);return d.data||{};}
-function orderStatus(s){const x=String(s||"").toUpperCase();return ({SHIPPED:"SHIPPED",DELIVERED:"DELIVERED",CANCELLED:"CANCELLED",PROCESSING:"PROCESSING",UNSHIPPED:"PROCESSING"})[x]||null;}
+function orderStatus(s){const x=String(s||"").toUpperCase();return ({SHIPPED:"SHIPPED",DELIVERED:"DELIVERED",CANCELLED:"CANCELLED",PROCESSING:"PROCESSING",UNSHIPPED:"PROCESSING",CREATED:"PROCESSING",PAID:"PROCESSING"})[x]||null;}
 
 export async function onRequestPost({request,env}){
  try{
