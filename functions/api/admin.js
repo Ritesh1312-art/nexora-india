@@ -1,6 +1,7 @@
 import {json,readBody,supabase,signAdmin,validAdmin,telegram,getSupabaseKey} from "./_utils.js";
 import {syncCJ} from "./cj.js";
 import {syncDeodap} from "./deodap.js";
+import {submitCJOrder} from "./cj-submit-order.js";
 async function readSupabaseResult(r){const text=await r.text();let data;try{data=JSON.parse(text)}catch{data=text}return {ok:r.ok,status:r.status,data};}
 
 async function prepareSupplierOrders(env,orderId){
@@ -9,7 +10,7 @@ async function prepareSupplierOrders(env,orderId){
  if(!ir.ok||!Array.isArray(items))throw new Error(`Unable to load order items for supplier routing: ${JSON.stringify(items)}`);
  if(!items.length)return {created:0,manual:0};
  const productIds=[...new Set(items.map(x=>x.product_id).filter(Boolean))];
- const pr=await supabase(env,`products?id=in.(${productIds.map(encodeURIComponent).join(",")})&select=id,source,source_product_id,supplier_id`);
+ const pr=await supabase(env,`products?id=in.(${productIds.map(encodeURIComponent).join(",")})&select=id,source,source_product_id,supplier_id,source_sku`);
  const products=await pr.json();
  if(!pr.ok||!Array.isArray(products))throw new Error(`Unable to load product supplier mapping: ${JSON.stringify(products)}`);
  const productMap=new Map(products.map(x=>[x.id,x]));
@@ -19,7 +20,7 @@ async function prepareSupplierOrders(env,orderId){
   if(source==="MANUAL"){manual.push(item);continue;}
   const key=source;
   if(!groups.has(key))groups.set(key,{supplier_id:p?.supplier_id||null,supplier_cost:0,items:[]});
-  const g=groups.get(key);g.supplier_cost+=Number(item.total_cost_price||0);g.items.push({order_item_id:item.id,product_id:item.product_id,source_product_id:p?.source_product_id||null,quantity:Number(item.quantity||1),product_name:item.product_name,sku:item.sku||null});
+  const g=groups.get(key);g.supplier_cost+=Number(item.total_cost_price||0);g.items.push({order_item_id:item.id,product_id:item.product_id,source_product_id:p?.source_product_id||null,source_sku:p?.source_sku||null,quantity:Number(item.quantity||1),product_name:item.product_name,sku:p?.source_sku||item.sku||null});
  }
  const existing=await supabase(env,`supplier_orders?order_id=eq.${encodeURIComponent(orderId)}&select=id`);const existingRows=await existing.json();
  if(!existing.ok||!Array.isArray(existingRows))throw new Error(`Unable to check existing supplier orders: ${JSON.stringify(existingRows)}`);
@@ -87,11 +88,13 @@ export async function onRequestPost({request,env}) {
    const payment_status=status==="VERIFIED"?"VERIFIED":"REJECTED";
    if(status==="VERIFIED"){
     const prepared=await prepareSupplierOrders(env,b.order_id);
+    let submitted=0,submissionError=null;
+    try{const result=await submitCJOrder(env,b.order_id);submitted=result.submitted||0;}catch(e){submissionError=String(e?.message||e);}
     const order_status=prepared.created>0?"PROCESSING":"PAID";
-    const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status})});
+    const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status,admin_notes:submissionError?`CJ submission pending: ${submissionError}`:null})});
     if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);
-    await telegram(env,`💳 NEXORA-INDIA PAYMENT VERIFIED\nOrder: ${b.order_id}\nSupplier routes prepared: ${prepared.created}\nManual items: ${prepared.manual}`);
-    return json({ok:true,supplier_orders_prepared:prepared.created,manual_items:prepared.manual,order_status});
+    await telegram(env,`💳 NEXORA-INDIA PAYMENT VERIFIED\nOrder: ${b.order_id}\nSupplier routes prepared: ${prepared.created}\nCJ submitted: ${submitted}\nManual items: ${prepared.manual}${submissionError?`\nCJ submission pending: ${submissionError}`:""}`);
+    return json({ok:true,supplier_orders_prepared:prepared.created,cj_submitted:submitted,manual_items:prepared.manual,order_status,submission_pending:!!submissionError});
    }
    const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status:"PENDING_PAYMENT"})});
    if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);await telegram(env,`💳 NEXORA-INDIA PAYMENT REJECTED\nOrder: ${b.order_id}`);return json({ok:true});
