@@ -3,142 +3,50 @@ import {syncCJ} from "./cj.js";
 import {syncDeodap} from "./deodap.js";
 import {submitCJOrder} from "./cj-submit-order.js";
 async function readSupabaseResult(r){const text=await r.text();let data;try{data=JSON.parse(text)}catch{data=text}return {ok:r.ok,status:r.status,data};}
-
 async function prepareSupplierOrders(env,orderId){
- const ir=await supabase(env,`order_items?order_id=eq.${encodeURIComponent(orderId)}&select=id,product_id,quantity,total_cost_price,product_name,sku`);
- const items=await ir.json();
- if(!ir.ok||!Array.isArray(items))throw new Error(`Unable to load order items for supplier routing: ${JSON.stringify(items)}`);
- if(!items.length)return {created:0,manual:0};
- const productIds=[...new Set(items.map(x=>x.product_id).filter(Boolean))];
- const pr=await supabase(env,`products?id=in.(${productIds.map(encodeURIComponent).join(",")})&select=id,source,source_product_id,supplier_id,source_sku`);
- const products=await pr.json();
+ const ir=await supabase(env,`order_items?order_id=eq.${encodeURIComponent(orderId)}&select=id,product_id,quantity,total_cost_price,product_name,sku`);const items=await ir.json();
+ if(!ir.ok||!Array.isArray(items))throw new Error(`Unable to load order items for supplier routing: ${JSON.stringify(items)}`);if(!items.length)return {created:0,manual:0};
+ const productIds=[...new Set(items.map(x=>x.product_id).filter(Boolean))];const pr=await supabase(env,`products?id=in.(${productIds.map(encodeURIComponent).join(",")})&select=id,source,source_product_id,supplier_id,source_sku`);const products=await pr.json();
  if(!pr.ok||!Array.isArray(products))throw new Error(`Unable to load product supplier mapping: ${JSON.stringify(products)}`);
- const productMap=new Map(products.map(x=>[x.id,x]));
- const groups=new Map(),manual=[];
- for(const item of items){
-  const p=productMap.get(item.product_id);const source=String(p?.source||"MANUAL").toUpperCase();
-  if(source==="MANUAL"){manual.push(item);continue;}
-  const key=source;
-  if(!groups.has(key))groups.set(key,{supplier_id:p?.supplier_id||null,supplier_cost:0,items:[]});
-  const g=groups.get(key);g.supplier_cost+=Number(item.total_cost_price||0);g.items.push({order_item_id:item.id,product_id:item.product_id,source_product_id:p?.source_product_id||null,source_sku:p?.source_sku||null,quantity:Number(item.quantity||1),product_name:item.product_name,sku:p?.source_sku||item.sku||null});
- }
- const existing=await supabase(env,`supplier_orders?order_id=eq.${encodeURIComponent(orderId)}&select=id`);const existingRows=await existing.json();
- if(!existing.ok||!Array.isArray(existingRows))throw new Error(`Unable to check existing supplier orders: ${JSON.stringify(existingRows)}`);
- if(existingRows.length)return {created:0,manual:manual.length,alreadyPrepared:true};
- let created=0;
- for(const [source,g] of groups){
-  const supplierQuery=g.supplier_id?`id=eq.${encodeURIComponent(g.supplier_id)}&select=id,name,api_enabled`: `source_type=eq.${encodeURIComponent(source)}&active=eq.true&select=id,name,api_enabled&limit=1`;
-  const sr=await supabase(env,`suppliers?${supplierQuery}`);const suppliers=await sr.json();
-  if(!sr.ok||!Array.isArray(suppliers)||!suppliers[0])throw new Error(`No active supplier configured for source ${source}`);
-  const supplier=suppliers[0];
-  const body={order_id:orderId,supplier_id:supplier.id,supplier_cost:Number(g.supplier_cost.toFixed(2)),status:"PENDING",supplier_notes:JSON.stringify({source,items:g.items,api_enabled:!!supplier.api_enabled})};
-  const r=await supabase(env,"supplier_orders",{method:"POST",body:JSON.stringify(body)});const data=await r.json().catch(()=>null);
-  if(!r.ok)throw new Error(`Supplier order preparation failed for ${source}: ${JSON.stringify(data)}`);
-  created++;
- }
- return {created,manual:manual.length};
+ const productMap=new Map(products.map(x=>[x.id,x])),groups=new Map(),manual=[];
+ for(const item of items){const p=productMap.get(item.product_id),source=String(p?.source||"MANUAL").toUpperCase();if(source==="MANUAL"){manual.push(item);continue}const key=source;if(!groups.has(key))groups.set(key,{supplier_id:p?.supplier_id||null,supplier_cost:0,items:[]});const g=groups.get(key);g.supplier_cost+=Number(item.total_cost_price||0);g.items.push({order_item_id:item.id,product_id:item.product_id,source_product_id:p?.source_product_id||null,source_sku:p?.source_sku||null,quantity:Number(item.quantity||1),product_name:item.product_name,sku:p?.source_sku||item.sku||null});}
+ const existing=await supabase(env,`supplier_orders?order_id=eq.${encodeURIComponent(orderId)}&select=id`);const existingRows=await existing.json();if(!existing.ok||!Array.isArray(existingRows))throw new Error(`Unable to check existing supplier orders: ${JSON.stringify(existingRows)}`);if(existingRows.length)return {created:0,manual:manual.length,alreadyPrepared:true};
+ let created=0;for(const [source,g] of groups){const supplierQuery=g.supplier_id?`id=eq.${encodeURIComponent(g.supplier_id)}&select=id,name,api_enabled`:`source_type=eq.${encodeURIComponent(source)}&active=eq.true&select=id,name,api_enabled&limit=1`;const sr=await supabase(env,`suppliers?${supplierQuery}`);const suppliers=await sr.json();if(!sr.ok||!Array.isArray(suppliers)||!suppliers[0])throw new Error(`No active supplier configured for source ${source}`);const supplier=suppliers[0];const body={order_id:orderId,supplier_id:supplier.id,supplier_cost:Number(g.supplier_cost.toFixed(2)),status:"PENDING",supplier_notes:JSON.stringify({source,items:g.items,api_enabled:!!supplier.api_enabled})};const r=await supabase(env,"supplier_orders",{method:"POST",body:JSON.stringify(body)});const data=await r.json().catch(()=>null);if(!r.ok)throw new Error(`Supplier order preparation failed for ${source}: ${JSON.stringify(data)}`);created++;}return {created,manual:manual.length};
 }
-
-export async function onRequestPost({request,env}) {
- try {
-  const b=await readBody(request);
-  if(b.action==="login"){
-   if(!env.ADMIN_PASSWORD||!env.JWT_SECRET)return json({error:"Admin secrets are not configured"},500);
-   if(b.password!==env.ADMIN_PASSWORD)return json({error:"Invalid password"},401);
-   const t=await signAdmin(env);
-   return json({ok:true},200,{headers:{"Set-Cookie":`nexora_admin=${t}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`}});
-  }
-  if(b.action==="logout")return json({ok:true},200,{headers:{"Set-Cookie":"nexora_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"}});
-  if(!(await validAdmin(request,env)))return json({error:"Admin login required"},401);
-  if(!env.SUPABASE_URL)return json({error:"SUPABASE_URL is not configured in Cloudflare Pages Functions environment"},500);
-  if(!getSupabaseKey(env))return json({error:"SUPABASE_SECRET_KEY is not configured in Cloudflare Pages Functions environment"},500);
-  try{new URL(env.SUPABASE_URL)}catch{return json({error:"SUPABASE_URL is invalid in Cloudflare Pages Functions environment"},500)}
-
-  if(b.action==="stats"){
-   const checks={products:await readSupabaseResult(await supabase(env,"products?select=id&limit=1")),profiles:await readSupabaseResult(await supabase(env,"profiles?select=id&limit=1")),orders:await readSupabaseResult(await supabase(env,"orders?select=id,total_amount&limit=1"))};
-   const bad=Object.entries(checks).filter(([,x])=>!x.ok);
-   if(bad.length)return json({error:"Supabase query failed",details:bad.map(([name,x])=>({table:name,status:x.status,response:x.data}))},502);
-   const [p,u,o]=await Promise.all([supabase(env,"products?select=id"),supabase(env,"profiles?select=id"),supabase(env,"orders?select=id,total_amount")]);
-   const ps=await p.json(),us=await u.json(),os=await o.json();
-   return json({products:Array.isArray(ps)?ps.length:0,users:Array.isArray(us)?us.length:0,orders:Array.isArray(os)?os.length:0,sales:Array.isArray(os)?os.reduce((s,x)=>s+Number(x.total_amount||0),0):0});
-  }
-  if(b.action==="products"){const r=await supabase(env,"products?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase products query failed",details:d},502);return json(d)}
-  if(b.action==="users"){
-   const r=await supabase(env,"profiles?select=*&order=created_at.desc");const d=await r.json();
-   if(!Array.isArray(d))return json({error:"Supabase profiles query failed",details:d},502);
-   const out=d.map(x=>({...x,email:null,last_sign_in_at:null,banned_until:null}));
-   const auth=await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users?per_page=1000`,{headers:{apikey:getSupabaseKey(env),Authorization:`Bearer ${getSupabaseKey(env)}`,"Content-Type":"application/json"}});
-   if(auth.ok){const ad=await auth.json();const map=new Map((ad.users||[]).map(x=>[x.id,x]));out.forEach(x=>{const a=map.get(x.id);if(a){x.email=a.email||"";x.last_sign_in_at=a.last_sign_in_at||null;x.banned_until=a.banned_until||null;}})}
-   return json(out);
-  }
-  if(b.action==="orders"){const r=await supabase(env,"orders?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase orders query failed",details:d},502);return json(d)}
-  if(b.action==="offers"){
-   const r=await supabase(env,"offers?select=*&order=created_at.desc");const d=await r.json();
-   if(!Array.isArray(d))return json({error:"Supabase offers query failed",details:d},502);
-   const tr=await supabase(env,"offer_targets?select=offer_id,user_id");const td=await tr.json();
-   const map=new Map();if(Array.isArray(td))for(const x of td){if(!map.has(x.offer_id))map.set(x.offer_id,[]);map.get(x.offer_id).push(x.user_id);}
-   return json(d.map(o=>({...o,target_user_ids:map.get(o.id)||[]})));
-  }
-  if(b.action==="update_product"){
-   const r=await supabase(env,`products?id=eq.${encodeURIComponent(b.id)}`,{method:"PATCH",body:JSON.stringify({selling_price:Number(b.price),stock:Number(b.stock),active:!!b.active,approved_by_admin:!!b.approved_by_admin,approved_at:b.approved_by_admin?new Date().toISOString():null})});
-   if(!r.ok)return json({error:await r.text()},500);return json({ok:true});
-  }
-  if(b.action==="verify_payment"){
-   const status=String(b.status||"").toUpperCase();if(!["VERIFIED","REJECTED"].includes(status))return json({error:"Invalid status"},400);
-   const payment_status=status==="VERIFIED"?"VERIFIED":"REJECTED";
-   if(status==="VERIFIED"){
-    const prepared=await prepareSupplierOrders(env,b.order_id);
-    let submitted=0,submissionError=null;
-    try{const result=await submitCJOrder(env,b.order_id);submitted=result.submitted||0;}catch(e){submissionError=String(e?.message||e);}
-    const order_status=prepared.created>0?"PROCESSING":"PAID";
-    const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status,admin_notes:submissionError?`CJ submission pending: ${submissionError}`:null})});
-    if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);
-    await telegram(env,`💳 NEXORA-INDIA PAYMENT VERIFIED\nOrder: ${b.order_id}\nSupplier routes prepared: ${prepared.created}\nCJ submitted: ${submitted}\nManual items: ${prepared.manual}${submissionError?`\nCJ submission pending: ${submissionError}`:""}`);
-    return json({ok:true,supplier_orders_prepared:prepared.created,cj_submitted:submitted,manual_items:prepared.manual,order_status,submission_pending:!!submissionError});
-   }
-   const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status:"PENDING_PAYMENT"})});
-   if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);await telegram(env,`💳 NEXORA-INDIA PAYMENT REJECTED\nOrder: ${b.order_id}`);return json({ok:true});
-  }
-  if(b.action==="create_offer"){
-   const requested=String(b.target_type||"ALL").toUpperCase();
-   const allowed=["ALL","ACTIVE_USERS","INACTIVE_USERS","SELECTED_USERS","NEW_USERS","EXISTING_CUSTOMERS","NO_ORDER_USERS","REPEAT_CUSTOMERS"];
-   if(!allowed.includes(requested))return json({error:"Invalid offer target"},400);
-   const name=String(b.name||"").trim(),code=String(b.code||"").trim()||null,discount=Number(b.discount_percent||0);
-   if(!name)return json({error:"Offer name is required"},400);
-   if(discount<=0||discount>100)return json({error:"Discount must be between 0 and 100"},400);
-   let targetType=requested,targetIds=[];
-   if(requested==="SELECTED_USERS"){
-    targetIds=[...new Set((Array.isArray(b.target_user_ids)?b.target_user_ids:[]).map(String).filter(Boolean))];
-    if(!targetIds.length)return json({error:"Select at least one user for a specific-user offer"},400);
-    const qr=await supabase(env,`profiles?id=in.(${targetIds.map(encodeURIComponent).join(",")})&select=id`);const valid=await qr.json();
-    if(!Array.isArray(valid)||valid.length!==targetIds.length)return json({error:"One or more selected users could not be found"},400);
-   }
-   if(requested==="ACTIVE_USERS"||requested==="INACTIVE_USERS"){
-    const filter=requested==="ACTIVE_USERS"?"is_active=eq.true&is_blocked=eq.false":"or=(is_active.eq.false,is_blocked.eq.true)";
-    const qr=await supabase(env,`profiles?select=id&${filter}`);const rows=await qr.json();
-    if(!Array.isArray(rows))return json({error:"Unable to resolve active/inactive users",details:rows},500);
-    targetType="SELECTED_USERS";targetIds=rows.map(x=>x.id);
-    if(!targetIds.length)return json({error:`No ${requested==="ACTIVE_USERS"?"active":"inactive"} users found`},400);
-   }
-   const body={name,code,offer_type:"PERCENTAGE",target_type:targetType,discount_percent:discount,active:b.active!==false,admin_approved:true,starts_at:new Date().toISOString()};
-   const r=await supabase(env,"offers",{method:"POST",body:JSON.stringify(body)});const offer=await r.json();
-   if(!r.ok||!Array.isArray(offer)||!offer[0])return json({error:"Offer creation failed",details:offer},500);
-   const offerId=offer[0].id;
-   if(targetType==="SELECTED_USERS"){
-    const rows=targetIds.map(user_id=>({offer_id:offerId,user_id,used_count:0}));
-    const tr=await supabase(env,"offer_targets",{method:"POST",body:JSON.stringify(rows)});
-    if(!tr.ok){await supabase(env,`offers?id=eq.${encodeURIComponent(offerId)}`,{method:"DELETE"});return json({error:"Offer target assignment failed",details:await tr.text()},500);}
-   }
-   return json({ok:true,offer_id:offerId,target_type:targetType,target_count:targetIds.length});
-  }
-  if(b.action==="cj_sync"){
-   try{const result=await syncCJ(env,supabase);await telegram(env,`🔄 Nexora-India CJ sync complete\nFootwear: ${result.footwear}\nKitchen Appliances: ${result.kitchen}`);return json({ok:true,...result});}
-   catch(e){return json({error:"CJ sync failed",details:String(e?.message||e)},502)}
-  }
-  if(b.action==="deodap_sync"){
-   try{const result=await syncDeodap(env,supabase);await telegram(env,`🔄 Nexora-India DeoDap sync complete\nDaily Use: ${result.daily}\nArtificial Jewellery: ${result.jewellery}`);return json({ok:true,...result});}
-   catch(e){return json({error:"DeoDap sync failed",details:String(e?.message||e)},502)}
-  }
-  return json({error:"Unknown admin action"},400);
- }catch(e){return json({error:"Admin API internal error",details:String(e?.message||e)},500)}
+async function releaseOrderStock(env,orderId){
+ const rr=await supabase(env,`orders?id=eq.${encodeURIComponent(orderId)}&select=id,stock_reserved,stock_released`);const rows=await rr.json();if(!rr.ok||!rows?.[0])throw new Error("Order not found");const o=rows[0];if(!o.stock_reserved||o.stock_released)return false;
+ const ir=await supabase(env,`order_items?order_id=eq.${encodeURIComponent(orderId)}&select=product_id,quantity`);const items=await ir.json();if(!ir.ok||!Array.isArray(items))throw new Error("Unable to load order items for stock release");
+ const rel=await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});if(!rel.ok)throw new Error(`Stock release failed: ${await rel.text()}`);
+ const ur=await supabase(env,`orders?id=eq.${encodeURIComponent(orderId)}`,{method:"PATCH",body:JSON.stringify({stock_released:true,updated_at:new Date().toISOString()})});if(!ur.ok)throw new Error("Unable to mark stock as released");return true;
 }
+export async function onRequestPost({request,env}){try{
+ const b=await readBody(request);
+ if(b.action==="login"){if(!env.ADMIN_PASSWORD||!env.JWT_SECRET)return json({error:"Admin secrets are not configured"},500);if(b.password!==env.ADMIN_PASSWORD)return json({error:"Invalid password"},401);const t=await signAdmin(env);return json({ok:true},200,{headers:{"Set-Cookie":`nexora_admin=${t}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`}})}
+ if(b.action==="logout")return json({ok:true},200,{headers:{"Set-Cookie":"nexora_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"}});
+ if(!(await validAdmin(request,env)))return json({error:"Admin login required"},401);
+ if(!env.SUPABASE_URL)return json({error:"SUPABASE_URL is not configured in Cloudflare Pages Functions environment"},500);if(!getSupabaseKey(env))return json({error:"SUPABASE_SECRET_KEY is not configured in Cloudflare Pages Functions environment"},500);try{new URL(env.SUPABASE_URL)}catch{return json({error:"SUPABASE_URL is invalid in Cloudflare Pages Functions environment"},500)}
+ if(b.action==="stats"){const checks={products:await readSupabaseResult(await supabase(env,"products?select=id&limit=1")),profiles:await readSupabaseResult(await supabase(env,"profiles?select=id&limit=1")),orders:await readSupabaseResult(await supabase(env,"orders?select=id,total_amount&limit=1"))};const bad=Object.entries(checks).filter(([,x])=>!x.ok);if(bad.length)return json({error:"Supabase query failed",details:bad.map(([name,x])=>({table:name,status:x.status,response:x.data}))},502);const [p,u,o]=await Promise.all([supabase(env,"products?select=id"),supabase(env,"profiles?select=id"),supabase(env,"orders?select=id,total_amount")]);const ps=await p.json(),us=await u.json(),os=await o.json();return json({products:Array.isArray(ps)?ps.length:0,users:Array.isArray(us)?us.length:0,orders:Array.isArray(os)?os.length:0,sales:Array.isArray(os)?os.reduce((s,x)=>s+Number(x.total_amount||0),0):0})}
+ if(b.action==="products"){const r=await supabase(env,"products?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase products query failed",details:d},502);return json(d)}
+ if(b.action==="users"){const r=await supabase(env,"profiles?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase profiles query failed",details:d},502);const out=d.map(x=>({...x,email:null,last_sign_in_at:null,banned_until:null}));const auth=await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users?per_page=1000`,{headers:{apikey:getSupabaseKey(env),Authorization:`Bearer ${getSupabaseKey(env)}`,"Content-Type":"application/json"}});if(auth.ok){const ad=await auth.json(),map=new Map((ad.users||[]).map(x=>[x.id,x]));out.forEach(x=>{const a=map.get(x.id);if(a){x.email=a.email||"";x.last_sign_in_at=a.last_sign_in_at||null;x.banned_until=a.banned_until||null}})}return json(out)}
+ if(b.action==="orders"){const r=await supabase(env,"orders?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase orders query failed",details:d},502);return json(d)}
+ if(b.action==="offers"){const r=await supabase(env,"offers?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase offers query failed",details:d},502);const tr=await supabase(env,"offer_targets?select=offer_id,user_id");const td=await tr.json();const map=new Map();if(Array.isArray(td))for(const x of td){if(!map.has(x.offer_id))map.set(x.offer_id,[]);map.get(x.offer_id).push(x.user_id)}return json(d.map(o=>({...o,target_user_ids:map.get(o.id)||[]})))}
+ if(b.action==="update_product"){const r=await supabase(env,`products?id=eq.${encodeURIComponent(b.id)}`,{method:"PATCH",body:JSON.stringify({selling_price:Number(b.price),stock:Number(b.stock),active:!!b.active,approved_by_admin:!!b.approved_by_admin,approved_at:b.approved_by_admin?new Date().toISOString():null})});if(!r.ok)return json({error:await r.text()},500);return json({ok:true})}
+ if(b.action==="verify_payment"){
+  const status=String(b.status||"").toUpperCase();if(!["VERIFIED","REJECTED"].includes(status))return json({error:"Invalid status"},400);const payment_status=status==="VERIFIED"?"VERIFIED":"REJECTED";
+  if(status==="VERIFIED"){
+   const prepared=await prepareSupplierOrders(env,b.order_id);let submitted=0,submissionError=null;try{const result=await submitCJOrder(env,b.order_id);submitted=result.submitted||0}catch(e){submissionError=String(e?.message||e)}
+   const first=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status:"PAID",admin_notes:submissionError?`CJ submission pending: ${submissionError}`:null,updated_at:new Date().toISOString()})});if(!first.ok)return json({error:"Order payment update failed",details:await first.text()},500);
+   let order_status="PAID";
+   if(prepared.created>0){order_status="PROCESSING";const pr=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({order_status,updated_at:new Date().toISOString()})});if(!pr.ok)return json({error:"Order processing status update failed",details:await pr.text()},500)}
+   if(submitted>0){order_status="SUPPLIER_ORDERED";const sr=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({order_status,updated_at:new Date().toISOString()})});if(!sr.ok)return json({error:"Supplier order status update failed",details:await sr.text()},500)}
+   await telegram(env,`💳 NEXORA-INDIA PAYMENT VERIFIED\nOrder: ${b.order_id}\nSupplier routes prepared: ${prepared.created}\nCJ submitted: ${submitted}\nManual items: ${prepared.manual}${submissionError?`\nCJ submission pending: ${submissionError}`:""}`);
+   return json({ok:true,supplier_orders_prepared:prepared.created,cj_submitted:submitted,manual_items:prepared.manual,order_status,submission_pending:!!submissionError});
+  }
+  let released=false;try{released=await releaseOrderStock(env,b.order_id)}catch(e){return json({error:"Payment rejected but reserved stock could not be released",details:String(e?.message||e)},500)}
+  const r=await supabase(env,`orders?id=eq.${encodeURIComponent(b.order_id)}`,{method:"PATCH",body:JSON.stringify({payment_status,order_status:"PENDING_PAYMENT",admin_notes:"Payment rejected; reserved stock released",updated_at:new Date().toISOString()})});if(!r.ok)return json({error:"Order update failed",details:await r.text()},500);await telegram(env,`💳 NEXORA-INDIA PAYMENT REJECTED\nOrder: ${b.order_id}\nStock released: ${released}`);return json({ok:true,stock_released:released})
+ }
+ if(b.action==="create_offer"){const requested=String(b.target_type||"ALL").toUpperCase();const allowed=["ALL","ACTIVE_USERS","INACTIVE_USERS","SELECTED_USERS","NEW_USERS","EXISTING_CUSTOMERS","NO_ORDER_USERS","REPEAT_CUSTOMERS"];if(!allowed.includes(requested))return json({error:"Invalid offer target"},400);const name=String(b.name||"").trim(),code=String(b.code||"").trim()||null,discount=Number(b.discount_percent||0);if(!name)return json({error:"Offer name is required"},400);if(discount<=0||discount>100)return json({error:"Discount must be between 0 and 100"},400);let targetType=requested,targetIds=[];if(requested==="SELECTED_USERS"){targetIds=[...new Set((Array.isArray(b.target_user_ids)?b.target_user_ids:[]).map(String).filter(Boolean))];if(!targetIds.length)return json({error:"Select at least one user for a specific-user offer"},400);const qr=await supabase(env,`profiles?id=in.(${targetIds.map(encodeURIComponent).join(",")})&select=id`);const valid=await qr.json();if(!Array.isArray(valid)||valid.length!==targetIds.length)return json({error:"One or more selected users could not be found"},400)}if(requested==="ACTIVE_USERS"||requested==="INACTIVE_USERS"){const filter=requested==="ACTIVE_USERS"?"is_active=eq.true&is_blocked=eq.false":"or=(is_active.eq.false,is_blocked.eq.true)";const qr=await supabase(env,`profiles?select=id&${filter}`);const rows=await qr.json();if(!Array.isArray(rows))return json({error:"Unable to resolve active/inactive users",details:rows},500);targetType="SELECTED_USERS";targetIds=rows.map(x=>x.id);if(!targetIds.length)return json({error:`No ${requested==="ACTIVE_USERS"?"active":"inactive"} users found`},400)}const body={name,code,offer_type:"PERCENTAGE",target_type:targetType,discount_percent:discount,active:b.active!==false,admin_approved:true,starts_at:new Date().toISOString()};const r=await supabase(env,"offers",{method:"POST",body:JSON.stringify(body)});const offer=await r.json();if(!r.ok||!Array.isArray(offer)||!offer[0])return json({error:"Offer creation failed",details:offer},500);const offerId=offer[0].id;if(targetType==="SELECTED_USERS"){const rows=targetIds.map(user_id=>({offer_id:offerId,user_id,used_count:0}));const tr=await supabase(env,"offer_targets",{method:"POST",body:JSON.stringify(rows)});if(!tr.ok){await supabase(env,`offers?id=eq.${encodeURIComponent(offerId)}`,{method:"DELETE"});return json({error:"Offer target assignment failed",details:await tr.text()},500)}}return json({ok:true,offer_id:offerId,target_type:targetType,target_count:targetIds.length})}
+ if(b.action==="cj_sync"){try{const result=await syncCJ(env,supabase);await telegram(env,`🔄 Nexora-India CJ sync complete\nFootwear: ${result.footwear}\nKitchen Appliances: ${result.kitchen}`);return json({ok:true,...result})}catch(e){return json({error:"CJ sync failed",details:String(e?.message||e)},502)}}
+ if(b.action==="deodap_sync"){try{const result=await syncDeodap(env,supabase);await telegram(env,`🔄 Nexora-India DeoDap sync complete\nDaily Use: ${result.daily}\nArtificial Jewellery: ${result.jewellery}`);return json({ok:true,...result})}catch(e){return json({error:"DeoDap sync failed",details:String(e?.message||e)},502)}}
+ return json({error:"Unknown admin action"},400);
+}catch(e){return json({error:"Admin API internal error",details:String(e?.message||e)},500)}}
