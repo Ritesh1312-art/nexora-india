@@ -1,3 +1,4 @@
+// CJ authentication: CJ_API_KEY is the source credential; access tokens are generated server-side.
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 
 async function requestTokenFromApiKey(apiKey){
