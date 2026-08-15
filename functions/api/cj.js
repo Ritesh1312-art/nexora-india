@@ -2,6 +2,8 @@ const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 
 async function getAccessToken(env) {
   const apiKey = String(env.CJ_API_KEY || "").trim();
+  const fallbackToken = String(env.CJ_ACCESS_TOKEN || "").trim();
+
   if (apiKey) {
     const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
       method: "POST",
@@ -9,24 +11,26 @@ async function getAccessToken(env) {
       body: JSON.stringify({ apiKey })
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.code !== 200 || !d.data?.accessToken) {
-      const msg = String(d.message || "Invalid CJ API key");
-      const code = d.code != null ? `code ${d.code}` : `HTTP ${r.status}`;
-      const requestId = d.requestId ? `, requestId ${d.requestId}` : "";
-      throw new Error(`CJ authentication failed (${code}${requestId}): ${msg}. CJ_API_KEY must contain the full active API Key copied from CJ, not an access token.`);
-    }
-    return d.data.accessToken;
+    if (r.ok && d.code === 200 && d.data?.accessToken) return d.data.accessToken;
+
+    // If an older but still-valid access token is configured, do not let a bad/new
+    // API-key variable prevent the integration from working.
+    if (fallbackToken) return fallbackToken;
+
+    const msg = String(d.message || "Invalid CJ API key");
+    const code = d.code != null ? `code ${d.code}` : `HTTP ${r.status}`;
+    const requestId = d.requestId ? `, requestId ${d.requestId}` : "";
+    throw new Error(`CJ authentication failed (${code}${requestId}): ${msg}. CJ_API_KEY must be the full active API Key copied from CJ.`);
   }
-  const accessToken = String(env.CJ_ACCESS_TOKEN || "").trim();
-  if (accessToken) return accessToken;
-  throw new Error("CJ_API_KEY is not configured");
+
+  if (fallbackToken) return fallbackToken;
+  throw new Error("CJ credentials are not configured. Set CJ_API_KEY to the full active API Key from CJ (preferred), or CJ_ACCESS_TOKEN as a legacy fallback.");
 }
 
 function categoryId(categories, aliases) {
   const wanted = aliases.map(x => x.toLowerCase());
   const exact = categories.find(c => wanted.includes(String(c.name || "").trim().toLowerCase()));
-  if (exact) return exact.id;
-  return null;
+  return exact?.id || null;
 }
 
 function textOf(p) {
@@ -36,7 +40,7 @@ function textOf(p) {
 const GROUPS = {
   footwear: {
     aliases: ["Footwear", "Shoes", "Footwear Products"],
-    keywords: ["shoes", "footwear", "sneakers", "sandals", "slippers", "boots", "loafers", "heels", "flats", "running shoes"]
+    keywords: ["shoes", "sneakers", "sandals", "slippers", "boots", "loafers", "heels", "flats", "running shoes", "footwear"]
   },
   kitchen: {
     aliases: ["Kitchen Appliances", "Kitchen appliance", "Kitchen & Home Appliances"],
@@ -51,10 +55,7 @@ async function searchProducts(token, keyword) {
   u.searchParams.set("keyWord", keyword);
   u.searchParams.set("features", "enable_category");
   const r = await fetch(u, {
-    headers: {
-      "CJ-Access-Token": token,
-      "Authorization": `Bearer ${token}`
-    }
+    headers: { "CJ-Access-Token": token }
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok || d.code !== 200) {
@@ -63,6 +64,23 @@ async function searchProducts(token, keyword) {
     throw new Error(`CJ product query failed for ${keyword} (${code}${requestId}): ${String(d.message || JSON.stringify(d))}`);
   }
   return (d.data?.content || []).flatMap(x => x.productList || []);
+}
+
+async function upsertBatch(env, supabase, rows) {
+  if (!rows.length) return;
+  const r = await supabase(
+    env,
+    "products?on_conflict=source,source_product_id",
+    {
+      method: "POST",
+      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(rows)
+    }
+  );
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Supabase CJ batch upsert failed (${r.status}). Ensure products has a unique constraint on (source, source_product_id). ${text}`);
+  }
 }
 
 export async function syncCJ(env, supabase) {
@@ -78,15 +96,19 @@ export async function syncCJ(env, supabase) {
   }
 
   const seen = new Set();
-  const imported = { footwear: 0, kitchen: 0 };
+  const rows = { footwear: [], kitchen: [] };
   const queries = [
     ...GROUPS.footwear.keywords.map(keyword => ["footwear", keyword]),
     ...GROUPS.kitchen.keywords.map(keyword => ["kitchen", keyword])
   ];
 
+  // Keep the sync safely below the Cloudflare Workers Free external-subrequest limit.
+  const MAX_PRODUCTS_TOTAL = 40;
   for (const [group, keyword] of queries) {
+    if (rows.footwear.length + rows.kitchen.length >= MAX_PRODUCTS_TOTAL) break;
     const products = await searchProducts(token, keyword);
     for (const p of products) {
+      if (rows.footwear.length + rows.kitchen.length >= MAX_PRODUCTS_TOTAL) break;
       const id = p.id || p.productId;
       if (!id || seen.has(String(id))) continue;
       const text = textOf(p);
@@ -95,18 +117,19 @@ export async function syncCJ(env, supabase) {
         : /(kitchen|appliance|blender|mixer|juicer|chopper|air fryer|kettle|toaster|sandwich maker|rice cooker|coffee maker|food processor|induction|electric cooker)/i.test(text);
       if (!isMatch) continue;
       seen.add(String(id));
+
       const costUsd = Number(p.nowPrice || p.discountPrice || p.sellPrice || 0) || 0;
       const rate = Number(env.CJ_USD_INR_RATE || 90) || 90;
       const cost = Number((costUsd * rate).toFixed(2));
       const stock = Math.max(0, Number(p.warehouseInventoryNum || p.totalVerifiedInventory || 0) || 0);
       const categoryIdValue = group === "footwear" ? footwearCategory : kitchenCategory;
-      const payload = {
+      rows[group].push({
         name: p.nameEn || "CJ Product",
         source: "CJ",
         source_product_id: String(id),
         source_sku: p.sku || p.spu || null,
         category_id: categoryIdValue,
-        image_url: p.bigImage || null,
+        image_url: p.bigImage || p.productImage || p.imageUrl || null,
         cost_price: cost,
         suggested_price: Number((cost * 1.5).toFixed(2)),
         selling_price: Number((cost * 1.5).toFixed(2)),
@@ -115,16 +138,10 @@ export async function syncCJ(env, supabase) {
         active: false,
         approved_by_admin: false,
         last_stock_sync_at: new Date().toISOString()
-      };
-      const q = await supabase(env, `products?source=eq.CJ&source_product_id=eq.${encodeURIComponent(String(id))}&select=id`);
-      const existing = await q.json();
-      if (existing?.[0]) {
-        await supabase(env, `products?id=eq.${encodeURIComponent(existing[0].id)}`, { method: "PATCH", body: JSON.stringify(payload) });
-      } else {
-        await supabase(env, "products", { method: "POST", body: JSON.stringify(payload) });
-      }
-      imported[group]++;
+      });
     }
   }
-  return { footwear: imported.footwear, kitchen: imported.kitchen, imported: imported.footwear + imported.kitchen };
+
+  await upsertBatch(env, supabase, [...rows.footwear, ...rows.kitchen]);
+  return { footwear: rows.footwear.length, kitchen: rows.kitchen.length, imported: rows.footwear.length + rows.kitchen.length };
 }
