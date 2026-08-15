@@ -26,8 +26,6 @@ async function getAccessToken(env,forceNew=false){
   const configuredAccess=String(env.CJ_ACCESS_TOKEN||"").trim();
   const configuredRefresh=String(env.CJ_REFRESH_TOKEN||"").trim();
 
-  // The API Key is the source of truth. Always try it first when present so an
-  // old/expired refresh token cannot silently override a newly configured key.
   if(configuredKey){
     try{return (await requestTokenFromApiKey(configuredKey)).accessToken;}catch(e){
       if(!configuredRefresh&&!configuredAccess)throw e;
@@ -63,6 +61,13 @@ async function upsertBatch(env,supabase,rows){
  if(!r.ok){const text=await r.text();throw new Error(`Supabase CJ batch upsert failed (${r.status}). Ensure products has a unique constraint on (source, source_product_id). ${text}`);}
 }
 
+async function getLiveProductIds(env,supabase){
+ const r=await supabase(env,"products?select=source_product_id&source=eq.CJ&active=eq.true");
+ const d=await r.json().catch(()=>null);
+ if(!r.ok||!Array.isArray(d))throw new Error(`Could not load live CJ products before sync: ${JSON.stringify(d)}`);
+ return new Set(d.map(x=>String(x.source_product_id||"")).filter(Boolean));
+}
+
 export async function syncCJ(env,supabase){
  let token=await getAccessToken(env);
  const catRes=await supabase(env,"categories?select=id,name&active=eq.true");const categories=await catRes.json();
@@ -70,14 +75,15 @@ export async function syncCJ(env,supabase){
  const footwearCategory=categoryId(categories,GROUPS.footwear.aliases),kitchenCategory=categoryId(categories,GROUPS.kitchen.aliases);
  if(!footwearCategory||!kitchenCategory)throw new Error(`CJ category mapping missing. Need store categories: Footwear and Kitchen Appliances. Found: ${categories.map(c=>c.name).join(", ")}`);
 
+ const liveIds=await getLiveProductIds(env,supabase);
  const runQueries=async(currentToken)=>{
-  const seen=new Set(),rows={footwear:[],kitchen:[]},queries=[...GROUPS.footwear.keywords.map(keyword=>["footwear",keyword]),...GROUPS.kitchen.keywords.map(keyword=>["kitchen",keyword])];
-  const MAX_PRODUCTS_TOTAL=40;
+  const seen=new Set(liveIds),rows={footwear:[],kitchen:[]},MAX_PER_CATEGORY=40;
+  const queries=[...GROUPS.footwear.keywords.map(keyword=>["footwear",keyword]),...GROUPS.kitchen.keywords.map(keyword=>["kitchen",keyword])];
   for(const [group,keyword] of queries){
-   if(rows.footwear.length+rows.kitchen.length>=MAX_PRODUCTS_TOTAL)break;
+   if(rows[group].length>=MAX_PER_CATEGORY)continue;
    const products=await searchProducts(currentToken,keyword);
    for(const p of products){
-    if(rows.footwear.length+rows.kitchen.length>=MAX_PRODUCTS_TOTAL)break;
+    if(rows[group].length>=MAX_PER_CATEGORY)break;
     const id=p.id||p.productId;if(!id||seen.has(String(id)))continue;const text=textOf(p);
     const isMatch=group==="footwear"?/(shoe|footwear|sneaker|sandal|slipper|boot|loafer|heel|flat)/i.test(text):/(kitchen|appliance|blender|mixer|juicer|chopper|air fryer|kettle|toaster|sandwich maker|rice cooker|coffee maker|food processor|induction|electric cooker)/i.test(text);
     if(!isMatch)continue;seen.add(String(id));
@@ -92,7 +98,6 @@ export async function syncCJ(env,supabase){
  let rows;
  try{rows=await runQueries(token);}catch(e){
   if(Number(e?.cjCode)!==1600001)throw e;
-  // A product call rejected the token. Re-authenticate once using the full API key.
   const key=String(env.CJ_API_KEY||"").trim();
   if(!key)throw new Error("CJ returned 1600001 (invalid access token) and no CJ_API_KEY is configured.");
   await logoutToken(token);
