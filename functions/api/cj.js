@@ -11,7 +11,9 @@ async function getAccessToken(env) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok || d.code !== 200 || !d.data?.accessToken) {
       const msg = String(d.message || "Invalid CJ API key");
-      throw new Error(`CJ authentication failed: ${msg}. Check that Cloudflare CJ_API_KEY contains the full active API Key copied from CJ, not an access token.`);
+      const code = d.code != null ? `code ${d.code}` : `HTTP ${r.status}`;
+      const requestId = d.requestId ? `, requestId ${d.requestId}` : "";
+      throw new Error(`CJ authentication failed (${code}${requestId}): ${msg}. CJ_API_KEY must contain the full active API Key copied from CJ, not an access token.`);
     }
     return d.data.accessToken;
   }
@@ -48,9 +50,18 @@ async function searchProducts(token, keyword) {
   u.searchParams.set("size", "100");
   u.searchParams.set("keyWord", keyword);
   u.searchParams.set("features", "enable_category");
-  const r = await fetch(u, { headers: { "CJ-Access-Token": token } });
+  const r = await fetch(u, {
+    headers: {
+      "CJ-Access-Token": token,
+      "Authorization": `Bearer ${token}`
+    }
+  });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok || d.code !== 200) throw new Error(`CJ product query failed for ${keyword}: ${String(d.message || JSON.stringify(d))}`);
+  if (!r.ok || d.code !== 200) {
+    const code = d.code != null ? `code ${d.code}` : `HTTP ${r.status}`;
+    const requestId = d.requestId ? `, requestId ${d.requestId}` : "";
+    throw new Error(`CJ product query failed for ${keyword} (${code}${requestId}): ${String(d.message || JSON.stringify(d))}`);
+  }
   return (d.data?.content || []).flatMap(x => x.productList || []);
 }
 
