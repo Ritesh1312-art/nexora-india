@@ -17,13 +17,9 @@ export async function onRequestPost({request,env}){
   if(RELEASE.has(next)&&rows[0].stock_reserved&&!rows[0].stock_released){
    const rr=await supabase(env,`order_items?order_id=eq.${encodeURIComponent(orderId)}&select=product_id,quantity`);const items=await rr.json();
    if(!rr.ok||!Array.isArray(items))return json({error:"Unable to load order items for stock release"},500);
-   for(const item of items){
-    if(!item.product_id)continue;
-    const pr=await supabase(env,`products?id=eq.${encodeURIComponent(item.product_id)}&select=id,stock`);const products=await pr.json();
-    if(!Array.isArray(products)||!products[0])continue;
-    const stock=Math.max(0,Number(products[0].stock||0)+Number(item.quantity||0));
-    await supabase(env,`products?id=eq.${encodeURIComponent(item.product_id)}`,{method:"PATCH",body:JSON.stringify({stock,updated_at:now})});
-   }
+   const release=await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});
+   const releaseData=await release.json().catch(()=>null);
+   if(!release.ok)return json({error:"Unable to release reserved stock",details:releaseData},500);
    patch.stock_released=true;
   }
   const ur=await supabase(env,`orders?id=eq.${encodeURIComponent(orderId)}`,{method:"PATCH",body:JSON.stringify(patch)});
