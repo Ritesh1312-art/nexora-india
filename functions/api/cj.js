@@ -1,30 +1,43 @@
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 
 async function getAccessToken(env) {
-  const apiKey = String(env.CJ_API_KEY || "").trim();
-  const fallbackToken = String(env.CJ_ACCESS_TOKEN || "").trim();
+  const configuredKey = String(env.CJ_API_KEY || "").trim();
+  const configuredAccess = String(env.CJ_ACCESS_TOKEN || "").trim();
+  const configuredRefresh = String(env.CJ_REFRESH_TOKEN || "").trim();
 
-  if (apiKey) {
-    const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
+  // Preferred: refresh an existing CJ refresh token.
+  if (configuredRefresh) {
+    const r = await fetch(`${CJ_BASE}/authentication/refreshAccessToken`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey })
+      body: JSON.stringify({ refreshToken: configuredRefresh })
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.code === 200 && d.data?.accessToken) return d.data.accessToken;
-
-    // If an older but still-valid access token is configured, do not let a bad/new
-    // API-key variable prevent the integration from working.
-    if (fallbackToken) return fallbackToken;
-
-    const msg = String(d.message || "Invalid CJ API key");
-    const code = d.code != null ? `code ${d.code}` : `HTTP ${r.status}`;
-    const requestId = d.requestId ? `, requestId ${d.requestId}` : "";
-    throw new Error(`CJ authentication failed (${code}${requestId}): ${msg}. CJ_API_KEY must be the full active API Key copied from CJ.`);
   }
 
-  if (fallbackToken) return fallbackToken;
-  throw new Error("CJ credentials are not configured. Set CJ_API_KEY to the full active API Key from CJ (preferred), or CJ_ACCESS_TOKEN as a legacy fallback.");
+  // Preferred credential: CJ API Key -> access token.
+  if (configuredKey) {
+    // CJ API keys have the documented CJUserNum@api@... shape. If a token was
+    // accidentally pasted into CJ_API_KEY, use it directly as a last-resort token.
+    if (configuredKey.includes("@api@")) {
+      const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: configuredKey })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.code === 200 && d.data?.accessToken) return d.data.accessToken;
+    } else {
+      return configuredKey;
+    }
+  }
+
+  // Explicit access token fallback. CJ's product APIs authenticate with this
+  // value in the CJ-Access-Token header.
+  if (configuredAccess) return configuredAccess;
+
+  throw new Error("CJ credentials are invalid or missing. Set CJ_API_KEY to the active CJ API Key (CJUserNum@api@...), or CJ_ACCESS_TOKEN to a valid access token. CJ_REFRESH_TOKEN is also supported.");
 }
 
 function categoryId(categories, aliases) {
@@ -54,9 +67,7 @@ async function searchProducts(token, keyword) {
   u.searchParams.set("size", "100");
   u.searchParams.set("keyWord", keyword);
   u.searchParams.set("features", "enable_category");
-  const r = await fetch(u, {
-    headers: { "CJ-Access-Token": token }
-  });
+  const r = await fetch(u, { headers: { "CJ-Access-Token": token } });
   const d = await r.json().catch(() => ({}));
   if (!r.ok || d.code !== 200) {
     const code = d.code != null ? `code ${d.code}` : `HTTP ${r.status}`;
@@ -68,15 +79,11 @@ async function searchProducts(token, keyword) {
 
 async function upsertBatch(env, supabase, rows) {
   if (!rows.length) return;
-  const r = await supabase(
-    env,
-    "products?on_conflict=source,source_product_id",
-    {
-      method: "POST",
-      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify(rows)
-    }
-  );
+  const r = await supabase(env, "products?on_conflict=source,source_product_id", {
+    method: "POST",
+    headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(rows)
+  });
   if (!r.ok) {
     const text = await r.text();
     throw new Error(`Supabase CJ batch upsert failed (${r.status}). Ensure products has a unique constraint on (source, source_product_id). ${text}`);
@@ -101,9 +108,8 @@ export async function syncCJ(env, supabase) {
     ...GROUPS.footwear.keywords.map(keyword => ["footwear", keyword]),
     ...GROUPS.kitchen.keywords.map(keyword => ["kitchen", keyword])
   ];
-
-  // Keep the sync safely below the Cloudflare Workers Free external-subrequest limit.
   const MAX_PRODUCTS_TOTAL = 40;
+
   for (const [group, keyword] of queries) {
     if (rows.footwear.length + rows.kitchen.length >= MAX_PRODUCTS_TOTAL) break;
     const products = await searchProducts(token, keyword);
