@@ -12,7 +12,7 @@
 <div id="login" class="panel login"><h2>Admin Login</h2><div class="field"><label>Admin password</label><input id="password" class="input" type="password" autocomplete="current-password"></div><button id="loginBtn" class="btn">Login</button><div id="loginMsg"></div></div>
 <div id="dash" class="hide">
 <h2>Nexora-India Admin</h2><div id="stats" class="admin-grid"></div>
-<div class="tabs"><button class="btn" onclick="tab('products')">Products</button><button class="btn secondary" onclick="tab('orders')">Orders</button><button class="btn secondary" onclick="tab('users')">Users</button><button class="btn secondary" onclick="tab('offers')">Offers</button><button class="btn secondary" onclick="syncCJ()">CJ Sync</button></div>
+<div class="tabs"><button class="btn" onclick="tab('products')">Products</button><button class="btn secondary" onclick="tab('orders')">Orders</button><button class="btn secondary" onclick="tab('users')">Users</button><button class="btn secondary" onclick="tab('offers')">Offers</button><button class="btn secondary" onclick="syncCJ()">CJ Sync</button><button class="btn secondary" onclick="syncDeoDap()">DeoDap Sync</button></div>
 <div id="content"></div>
 </div></main>
 <script>
@@ -27,6 +27,7 @@ window.editProduct=function(id){const p=D.p.find(x=>x.id===id);$('#editor').inne
 window.saveProduct=async id=>{try{await api({action:'update_product',id,price:Number($('#price').value),stock:Number($('#stock').value),active:$('#live').checked,approved_by_admin:$('#live').checked});await load()}catch(e){alert(errText(e))}};
 window.verify=async id=>{const s=prompt('Payment status: VERIFIED or REJECTED','VERIFIED');if(!s)return;try{await api({action:'verify_payment',order_id:id,status:s});await load()}catch(e){alert(errText(e))}};
 window.createOffer=async()=>{try{await api({action:'create_offer',name:$('#oname').value,code:$('#ocode').value||null,discount_percent:Number($('#odisc').value||0)});await load()}catch(e){alert(errText(e))}};
-window.syncCJ=async()=>{try{const d=await api({action:'cj_sync'});alert('CJ sync complete. Imported/updated: '+(d.imported||0));await load()}catch(e){alert(errText(e))}};
+window.syncCJ=async()=>{try{const d=await api({action:'cj_sync'});alert('CJ sync complete. Imported/updated: '+(d.imported||0)+' | Footwear: '+(d.footwear||0)+' | Kitchen Appliances: '+(d.kitchen||0));await load()}catch(e){alert(errText(e))}};
+window.syncDeoDap=async()=>{try{const d=await api({action:'deodap_sync'});alert('DeoDap sync complete. Imported/updated: '+(d.imported||0)+' | Daily Use Products: '+(d.daily||0)+' | Artificial Jewellery: '+(d.jewellery||0));await load()}catch(e){alert(errText(e))}};
 $('#logout').onclick=async()=>{await api({action:'logout'});location.href='/admin.html'};
 </script></body></html>
