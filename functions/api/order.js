@@ -1,6 +1,12 @@
 import {json,readBody,supabase,telegram} from "./_utils.js";
 import {validateOffer} from "./offer.js";
 
+async function releaseReservedStock(env,items){
+  try{
+    await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});
+  }catch{}
+}
+
 export async function onRequestPost({request,env}) {
   const auth=request.headers.get("Authorization")||"";
   if(!auth.startsWith("Bearer ")) return json({error:"Login required"},401);
@@ -31,10 +37,27 @@ export async function onRequestPost({request,env}) {
   }
   const shipping=items.reduce((sum,line)=>{const p=ps.find(x=>x.id===line.product_id);return sum+Number(p?.delivery_charge||0);},0);
   const total=Math.max(0,Number((subtotal-discount+shipping).toFixed(2)));
-  const orderBody={user_id:u.id,customer_name:c.name,customer_email:u.email||null,customer_phone:c.phone,address_line1:c.address_line1,address_line2:c.address_line2||null,city:c.city,state:c.state,pincode:c.pincode,landmark:c.landmark||null,subtotal,discount_amount:discount,shipping_amount:shipping,total_amount:total,estimated_supplier_cost:cost,estimated_profit:Number((total-cost).toFixed(2)),offer_id:offerId,offer_code:offerCode,payment_method:"UPI",payment_status:b.utr?"SUBMITTED":"PENDING",utr:b.utr||null,order_status:b.utr?"PAYMENT_SUBMITTED":"PENDING_PAYMENT"};
-  const or=await supabase(env,"orders",{method:"POST",body:JSON.stringify(orderBody)});const od=await or.json();if(!or.ok)return json({error:od?.message||"Order creation failed"},500);
+
+  // Reserve stock atomically in PostgreSQL. This closes the race where two
+  // simultaneous checkouts could both pass the browser/API stock check.
+  const reservation=await supabase(env,"rpc/reserve_product_stock",{method:"POST",body:JSON.stringify({p_items:items.map(x=>({product_id:x.product_id,quantity:x.quantity}))})});
+  const reservationData=await reservation.json().catch(()=>null);
+  if(!reservation.ok){
+    const msg=String(reservationData?.message||reservationData?.hint||"");
+    const insufficient=msg.includes("INSUFFICIENT_STOCK")||reservationData?.code==="P0001";
+    return json({error:insufficient?"One or more products went out of stock during checkout":"Unable to reserve product stock",details:msg||reservationData},409);
+  }
+
+  const orderBody={user_id:u.id,customer_name:c.name,customer_email:u.email||null,customer_phone:c.phone,address_line1:c.address_line1,address_line2:c.address_line2||null,city:c.city,state:c.state,pincode:c.pincode,landmark:c.landmark||null,subtotal,discount_amount:discount,shipping_amount:shipping,total_amount:total,estimated_supplier_cost:cost,estimated_profit:Number((total-cost).toFixed(2)),offer_id:offerId,offer_code:offerCode,payment_method:"UPI",payment_status:b.utr?"SUBMITTED":"PENDING",utr:b.utr||null,order_status:b.utr?"PAYMENT_SUBMITTED":"PENDING_PAYMENT",stock_reserved:true,stock_released:false};
+  const or=await supabase(env,"orders",{method:"POST",body:JSON.stringify(orderBody)});const od=await or.json();
+  if(!or.ok){await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})));return json({error:od?.message||"Order creation failed"},500);}
   const order=od[0];
-  const ir=await supabase(env,"order_items",{method:"POST",body:JSON.stringify(items.map(x=>({...x,order_id:order.id})))});if(!ir.ok)return json({error:"Order created but item save failed"},500);
+  const ir=await supabase(env,"order_items",{method:"POST",body:JSON.stringify(items.map(x=>({...x,order_id:order.id})))});
+  if(!ir.ok){
+    await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})));
+    await supabase(env,`orders?id=eq.${encodeURIComponent(order.id)}`,{method:"DELETE"});
+    return json({error:"Order created but item save failed"},500);
+  }
   await telegram(env,`🛍️ NEXORA-INDIA NEW ORDER\nOrder: ${order.order_number}\nCustomer: ${c.name}\nPhone: ${c.phone}\nAmount: ₹${total}\nDiscount: ₹${discount}\nPayment: ${order.payment_status}\nUTR: ${b.utr||"not submitted"}`);
-  return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount});
+  return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount,stock_reserved:true});
 }
