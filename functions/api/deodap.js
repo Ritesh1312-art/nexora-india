@@ -1,6 +1,5 @@
 const DEODAP_BASE = "https://deodap.in";
 
-// These are real public DeoDap collection handles currently exposed by the store.
 const DEFAULT_DAILY_COLLECTIONS = [
   "kitchen-home-appliances",
   "cleaning-housekeeping",
@@ -19,6 +18,12 @@ function stripHtml(value) {
 function moneyNumber(value) {
   const n = Number(String(value ?? "").replace(/[^0-9.\-]/g, ""));
   return Number.isFinite(n) ? n : 0;
+}
+
+function imageUrl(p) {
+  const raw = p.images?.[0]?.src || p.featured_image?.src || p.variants?.[0]?.featured_image?.src || null;
+  if (!raw) return null;
+  return String(raw).startsWith("//") ? `https:${raw}` : String(raw);
 }
 
 async function fetchCollection(handle) {
@@ -42,7 +47,7 @@ function findCategory(categories, aliases) {
 function payloadForProduct(p, categoryIdValue) {
   const v = p.variants?.[0] || {};
   const price = moneyNumber(v.price || p.price || 0);
-  const image = p.images?.[0]?.src || p.featured_image?.src || null;
+  const suggested = Number((price * 1.5).toFixed(2));
   const stock = v.inventory_quantity != null ? Math.max(0, Number(v.inventory_quantity) || 0) : 0;
   return {
     name: p.title || "DeoDap Product",
@@ -52,16 +57,33 @@ function payloadForProduct(p, categoryIdValue) {
     source_product_id: String(p.id),
     source_sku: v.sku || null,
     category_id: categoryIdValue,
-    image_url: image,
+    image_url: imageUrl(p),
     cost_price: price,
-    suggested_price: Number((price * 1.5).toFixed(2)),
-    selling_price: Number((price * 1.5).toFixed(2)),
+    suggested_price: suggested,
+    selling_price: suggested,
     stock,
     stock_mode: "AUTO",
     active: false,
     approved_by_admin: false,
     last_stock_sync_at: new Date().toISOString()
   };
+}
+
+async function upsertBatch(env, supabase, rows) {
+  if (!rows.length) return;
+  const r = await supabase(
+    env,
+    "products?on_conflict=source,source_product_id",
+    {
+      method: "POST",
+      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(rows)
+    }
+  );
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Supabase DeoDap batch upsert failed (${r.status}). Ensure products has a unique constraint on (source, source_product_id). ${text}`);
+  }
 }
 
 export async function syncDeodap(env, supabase) {
@@ -84,38 +106,36 @@ export async function syncDeodap(env, supabase) {
   const allJewellery = [];
   for (const handle of jewelleryHandles) {
     for (const p of await fetchCollectionSafe(handle)) {
-      const id = String(p.id);
+      const id = String(p.id || "");
       if (id && !jewelleryIds.has(id)) { jewelleryIds.add(id); allJewellery.push(p); }
     }
   }
 
-  const imported = { jewellery: 0, daily: 0 };
+  const rows = { jewellery: [], daily: [] };
   const seen = new Set();
-  const upsert = async (p, categoryIdValue) => {
-    const id = String(p.id || "");
-    if (!id || seen.has(id)) return false;
-    seen.add(id);
-    const payload = payloadForProduct(p, categoryIdValue);
-    const q = await supabase(env, `products?source=eq.DEODAP&source_product_id=eq.${encodeURIComponent(id)}&select=id`);
-    const existing = await q.json();
-    let r;
-    if (existing?.[0]) r = await supabase(env, `products?id=eq.${encodeURIComponent(existing[0].id)}`, { method: "PATCH", body: JSON.stringify(payload) });
-    else r = await supabase(env, "products", { method: "POST", body: JSON.stringify(payload) });
-    if (!r.ok) throw new Error(`Supabase DeoDap product write failed: ${await r.text()}`);
-    return true;
-  };
+  const MAX_PER_CATEGORY = 20;
 
-  for (const p of allJewellery) if (await upsert(p, jewelleryId)) imported.jewellery++;
+  for (const p of allJewellery) {
+    if (rows.jewellery.length >= MAX_PER_CATEGORY) break;
+    const id = String(p.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    rows.jewellery.push(payloadForProduct(p, jewelleryId));
+  }
 
   for (const handle of dailyHandles) {
+    if (rows.daily.length >= MAX_PER_CATEGORY) break;
     for (const p of await fetchCollectionSafe(handle)) {
-      if (jewelleryIds.has(String(p.id))) continue;
-      if (await upsert(p, dailyId)) imported.daily++;
+      if (rows.daily.length >= MAX_PER_CATEGORY) break;
+      const id = String(p.id || "");
+      if (!id || seen.has(id) || jewelleryIds.has(id)) continue;
+      seen.add(id);
+      rows.daily.push(payloadForProduct(p, dailyId));
     }
   }
 
-  if (imported.daily === 0 && imported.jewellery === 0) {
-    throw new Error("No DeoDap products were returned. Check the public collection availability or configure DEODAP_DAILY_COLLECTIONS / DEODAP_JEWELLERY_COLLECTIONS in Cloudflare.");
-  }
-  return { daily: imported.daily, jewellery: imported.jewellery, imported: imported.daily + imported.jewellery };
+  await upsertBatch(env, supabase, [...rows.jewellery, ...rows.daily]);
+  const imported = rows.daily.length + rows.jewellery.length;
+  if (!imported) throw new Error("No DeoDap products were returned. Check the public collection availability or configure DEODAP_DAILY_COLLECTIONS / DEODAP_JEWELLERY_COLLECTIONS in Cloudflare.");
+  return { daily: rows.daily.length, jewellery: rows.jewellery.length, imported };
 }
