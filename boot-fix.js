@@ -21,10 +21,15 @@
     const el=e.target.closest('a,button'); if(!el)return;
     const text=(el.textContent||'').trim().toLowerCase(),href=(el.getAttribute('href')||'').toLowerCase();
     if(href==='#/admin'||text==='admin'){e.preventDefault();e.stopImmediatePropagation();location.href='/admin.html';return;}
-    // Keep authentication navigation deterministic even if another frontend listener runs first.
+
+    // CRITICAL AUTH GUARD: an authenticated customer must NEVER be sent back to Login.
+    // This listener runs in capture phase, so it wins over other frontend navigation handlers.
     if(el.id==='loginLink'||href==='#/login'||text==='login / register'){
-      e.preventDefault();e.stopImmediatePropagation();location.hash='#/login';setTimeout(()=>window.route?.(),0);return;
+      e.preventDefault();e.stopImmediatePropagation();
+      if(window.session){location.hash='#/account';return;}
+      location.hash='#/login';setTimeout(()=>window.route?.(),0);return;
     }
+
     // Cart is a logged-in customer feature; unauthenticated visitors are sent to login.
     if(el.id==='cartNav'||href==='#/cart'||text.startsWith('cart')){
       if(!window.session){e.preventDefault();e.stopImmediatePropagation();location.hash='#/login';setTimeout(()=>window.route?.(),0);}
@@ -39,6 +44,17 @@
     if(account)account.hidden=!loggedIn;
     if(logout)logout.hidden=!loggedIn;
     if(cartNav)cartNav.hidden=!loggedIn;
+  }
+
+  // Authenticated-route enforcement. This runs after the auth/session state has had time to hydrate.
+  function enforceAuthRoute(){
+    const h=location.hash||'';
+    if(window.session && (h==='#/login'||h==='#/register'||h==='#/forgot')){
+      location.hash='#/account';
+      return true;
+    }
+    syncCustomerNav();
+    return false;
   }
 
   function productCard(p){
@@ -62,7 +78,15 @@
       try{const p=await window.sb.from('products').select('id,name,slug,description,image_url,mrp,selling_price,stock,category_id,active,approved_by_admin,created_at,min_order_qty,delivery_charge,electrical_min_order_qty,electrical_delivery_charge').eq('active',true).eq('approved_by_admin',true).order('created_at',{ascending:false});if(p.error)throw p.error;window.products=p.data||[];}catch(e){console.warn('Products load failed:',e);window.products=[];}
     };
     try{await window.loadCatalog()}catch(e){console.error(e)}
-    window.renderHome=renderHomepage;try{window.refreshNav();window.route()}catch(e){console.error(e)}syncCustomerNav();window.addEventListener('hashchange',()=>setTimeout(syncCustomerNav,0));
+    window.renderHome=renderHomepage;
+    try{window.refreshNav();window.route()}catch(e){console.error(e)}
+    // Run enforcement immediately and again after delayed session hydration.
+    enforceAuthRoute();
+    setTimeout(enforceAuthRoute,250);
+    setTimeout(enforceAuthRoute,1000);
+    setTimeout(enforceAuthRoute,2000);
+    syncCustomerNav();
+    window.addEventListener('hashchange',()=>{setTimeout(enforceAuthRoute,0);setTimeout(syncCustomerNav,10)});
   }
   window.addEventListener('unhandledrejection',e=>console.warn('Nexora async error:',e.reason));boot();
 })();
