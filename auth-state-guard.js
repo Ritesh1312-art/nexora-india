@@ -8,6 +8,7 @@
   function syncNav(logged){const login=$('#loginLink'),account=$('#accountLink'),logout=$('#logoutBtn'),cart=$('#cartNav'),orders=$('#ordersLink');if(login)login.hidden=logged;if(account)account.hidden=!logged;if(logout)logout.hidden=!logged;if(cart)cart.hidden=!logged;if(orders)orders.hidden=true;}
   function renderRoute(){try{window.route?.()}catch(e){console.error('Nexora route:',e)}}
   function store(){if(location.hash!=='#/')history.replaceState(null,'','#/');syncNav(!!window.session);setTimeout(()=>{try{if(typeof window.renderHome==='function')window.renderHome();else renderRoute()}catch(e){console.error('Nexora Store render:',e)}},0);}
+  function products(){if(location.hash!=='#/products')history.replaceState(null,'','#/products');setTimeout(()=>{try{if(typeof window.renderProducts==='function')window.renderProducts();else renderRoute()}catch(e){console.error('Nexora Products render:',e)}},0);}
   function route(hash){if(location.hash===hash){setTimeout(renderRoute,0);return}location.hash=hash;}
   async function logout(sb){try{await sb.auth.signOut({scope:'local'})}catch(e){console.warn('Supabase logout:',e)}window.session=null;window.__nexoraAuthenticated=false;syncNav(false);store();}
   function handleNavigation(sb,e){
@@ -23,6 +24,7 @@
     if(!target)return;
     e.preventDefault();e.stopImmediatePropagation();
     if(target==='#/'){store();return;}
+    if(target==='#/products'){products();return;}
     if(authHashes.has(target)){if(logged)store();else route(target);return;}
     if(!logged&&protectedHashes.has(target)){route('#/login');return;}
     route(target);
@@ -39,7 +41,7 @@
     document.addEventListener('click',e=>handleNavigation(sb,e),true);
     await enforce(sb);
     if(!location.hash||location.hash==='#')store();
-    sb.auth.onAuthStateChange((_event,s)=>{window.session=s||null;window.sb=sb;syncNav(!!s);setTimeout(()=>{if(s)store();else store();},0)});
+    sb.auth.onAuthStateChange((_event,s)=>{window.session=s||null;window.sb=sb;syncNav(!!s);setTimeout(()=>store(),0)});
     window.addEventListener('hashchange',()=>setTimeout(()=>enforce(sb).catch(()=>{}),0));
   }catch(e){console.warn('Nexora auth/navigation controller:',e)}}
   boot();
