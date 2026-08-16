@@ -1,0 +1,60 @@
+/* Nexora-India Point 3: product detail UX. */
+(function(){
+  const esc=window.esc||((v)=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])));
+  const money=window.money||((n)=>'₹'+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2}));
+  let current=null, qty=1, selectedVariant=null;
+  const products=()=>window.products||[];
+  const cats=()=>window.categories||[];
+  function gallery(p){
+    let g=[];
+    if(Array.isArray(p.gallery))g=p.gallery;
+    else if(p.gallery&&typeof p.gallery==='object')g=Object.values(p.gallery);
+    g=g.map(x=>typeof x==='string'?x:(x?.url||x?.image_url||'')).filter(Boolean);
+    return [...new Set([p.image_url,...g].filter(Boolean))];
+  }
+  function findProduct(id){return products().find(p=>p.id===id||p.slug===id)}
+  function related(p){return products().filter(x=>x.id!==p.id&&x.category_id===p.category_id).slice(0,4)}
+  function render(id){
+    const p=findProduct(id); current=p; qty=1; selectedVariant=null;
+    if(!p){document.querySelector('#app').innerHTML='<div class="container"><div class="panel"><h2>Product not found</h2><a class="btn" href="#/products">Back to products</a></div></div>';return;}
+    const images=gallery(p); const cat=cats().find(c=>c.id===p.category_id);
+    const variants=(p.product_variants||[]).filter(v=>v.active!==false);
+    const mrp=Number(p.mrp||0), price=Number(p.selling_price||0), discount=mrp>price&&price>0?Math.round((mrp-price)/mrp*100):0;
+    const delivery=Number(p.delivery_charge||0), minQty=Math.max(1,Number(p.min_order_qty||1)); qty=minQty;
+    document.querySelector('#app').innerHTML=`<div class="detail-page">
+      <div class="detail-breadcrumb"><a href="#/">Store</a><span>›</span><a href="#/category/${encodeURIComponent(p.category_id)}">${esc(cat?.name||'Products')}</a><span>›</span><b>${esc(p.name)}</b></div>
+      <section class="product-detail">
+        <div class="detail-gallery"><div class="detail-main-image"><img id="detailMainImg" src="${esc(images[0]||'https://placehold.co/900x760?text=Nexora-India')}" alt="${esc(p.name)}"></div><div class="detail-thumbs">${images.map((im,i)=>`<button class="detail-thumb ${i===0?'active':''}" onclick="window.detailImage('${esc(im)}',this)"><img src="${esc(im)}" alt="${esc(p.name)} image ${i+1}" loading="lazy"></button>`).join('')}</div></div>
+        <div class="detail-info"><span class="detail-category">${esc(cat?.name||'Product')}</span><h1>${esc(p.name)}</h1>
+          <div class="detail-price-row"><strong>${money(price)}</strong>${mrp>price?`<del>${money(mrp)}</del><span class="discount-badge">${discount}% OFF</span>`:''}</div>
+          <div class="detail-stock ${Number(p.stock)>0?'in':'out'}">${Number(p.stock)>0?`✓ ${esc(String(p.stock))} available`:'Currently unavailable'}</div>
+          ${p.description?`<div class="detail-description">${esc(p.description).replace(/\n/g,'<br>')}</div>`:''}
+          <div class="detail-facts"><div><span>Delivery</span><b>${delivery>0?money(delivery):'Free'}</b></div><div><span>Minimum quantity</span><b>${minQty}</b></div>${p.sku?`<div><span>SKU</span><b>${esc(p.sku)}</b></div>`:''}</div>
+          ${variants.length?`<div class="variant-box"><b>Choose option</b><div class="variant-list">${variants.map((v,i)=>`<button class="variant-btn ${i===0?'selected':''}" onclick="window.selectVariant('${v.id}',this)">${esc(v.variant_name||'Option '+(i+1))}<small>${money(v.selling_price||price)} · ${Number(v.stock)>0?'In stock':'Out'}</small></button>`).join('')}</div></div>`:''}
+          <div class="buy-row"><div class="qty-control"><button onclick="window.detailQty(-1)">−</button><span id="detailQty">${qty}</span><button onclick="window.detailQty(1)">+</button></div><button class="btn detail-cart" ${Number(p.stock)<=0?'disabled':''} onclick="window.detailAdd()">Add to cart</button><button class="btn secondary detail-buy" ${Number(p.stock)<=0?'disabled':''} onclick="window.detailBuy()">Buy now</button></div>
+          <div id="detailMsg"></div>
+        </div>
+      </section>
+      ${related(p).length?`<section class="detail-related"><div class="section-heading"><div><span class="section-kicker">YOU MAY ALSO LIKE</span><h2>Related products</h2></div></div><div class="home-product-grid">${related(p).map(x=>`<article class="home-product-card"><a href="#/product/${encodeURIComponent(x.id)}"><div class="home-product-image"><img src="${esc(x.image_url||'https://placehold.co/700x560?text=Nexora-India')}" alt="${esc(x.name)}" loading="lazy"></div></a><div class="home-product-body"><h3>${esc(x.name)}</h3><div class="home-price">${money(x.selling_price)}</div><button class="btn home-buy" onclick="event.preventDefault();addCart('${x.id}')">Add to cart</button></div></article>`).join('')}</div></section>`:''}
+    </div>`;
+    selectedVariant=variants[0]||null;
+    if(selectedVariant&&selectedVariant.selling_price)updateVariantPrice();
+  }
+  function updateVariantPrice(){
+    if(!selectedVariant)return;
+    const price=Number(selectedVariant.selling_price||current.selling_price);const stock=Number(selectedVariant.stock||0);
+    const el=document.querySelector('.detail-price-row strong');if(el)el.textContent=money(price);
+    const s=document.querySelector('.detail-stock');if(s){s.className='detail-stock '+(stock>0?'in':'out');s.textContent=stock>0?`✓ ${stock} available`:'Currently unavailable';}
+  }
+  window.detailImage=(src,btn)=>{const img=document.querySelector('#detailMainImg');if(img)img.src=src;document.querySelectorAll('.detail-thumb').forEach(x=>x.classList.remove('active'));btn?.classList.add('active')};
+  window.detailQty=(delta)=>{if(!current)return;const min=Math.max(1,Number(current.min_order_qty||1));const stock=Number(selectedVariant?.stock??current.stock??0);qty=Math.max(min,Math.min(stock||999,qty+delta));const el=document.querySelector('#detailQty');if(el)el.textContent=qty};
+  function add(q,go){
+    if(!current)return;const min=Math.max(1,Number(current.min_order_qty||1));const stock=Number(selectedVariant?.stock??current.stock??0);if(stock<q){showMsg('Requested quantity is not available.','error');return;}
+    let x=(window.cart||[]).find(i=>i.id===current.id);if(x)x.qty+=q;else window.cart.push({id:current.id,qty:q});localStorage.setItem('nexora_cart',JSON.stringify(window.cart));if(go)location.hash='#/checkout';else showMsg(`${q} item${q>1?'s':''} added to cart.`,'success');
+  }
+  function showMsg(text,type){const el=document.querySelector('#detailMsg');if(el)el.innerHTML=`<div class="notice ${type==='error'?'error':'success'}">${esc(text)}</div>`}
+  window.detailAdd=()=>add(qty,false); window.detailBuy=()=>add(qty,true);
+  window.selectVariant=(id,btn)=>{const p=current?.product_variants||[];selectedVariant=p.find(v=>v.id===id)||null;document.querySelectorAll('.variant-btn').forEach(x=>x.classList.remove('selected'));btn?.classList.add('selected');qty=Math.max(1,Number(current?.min_order_qty||1));const el=document.querySelector('#detailQty');if(el)el.textContent=qty;updateVariantPrice()};
+  function route(){const h=location.hash||'';const m=h.match(/^#\/product\/([^?]+)/);if(m){render(decodeURIComponent(m[1]));return true}return false}
+  const oldRoute=window.route;window.route=function(){if(route())return;return oldRoute&&oldRoute()};window.addEventListener('hashchange',route);
+})();
