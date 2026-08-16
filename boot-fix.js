@@ -3,7 +3,6 @@
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
 
   // Bridge the original app.js lexical state to modular frontend scripts.
-  // All scripts are classic scripts, so these bindings are accessible here.
   try{
     Object.defineProperties(window,{
       sb:{configurable:true,get:()=>sb,set:v=>{sb=v}},
@@ -21,13 +20,25 @@
   document.addEventListener('click',function(e){
     const el=e.target.closest('a,button'); if(!el)return;
     const text=(el.textContent||'').trim().toLowerCase(),href=(el.getAttribute('href')||'').toLowerCase();
-    if(href==='#/admin'||text==='admin'){e.preventDefault();e.stopImmediatePropagation();location.href='/admin.html';}
+    if(href==='#/admin'||text==='admin'){e.preventDefault();e.stopImmediatePropagation();location.href='/admin.html';return;}
+    // Keep authentication navigation deterministic even if another frontend listener runs first.
+    if(el.id==='loginLink'||href==='#/login'||text==='login / register'){
+      e.preventDefault();e.stopImmediatePropagation();location.hash='#/login';setTimeout(()=>window.route?.(),0);return;
+    }
+    // Cart is a logged-in customer feature; unauthenticated visitors are sent to login.
+    if(el.id==='cartNav'||href==='#/cart'||text.startsWith('cart')){
+      if(!window.session){e.preventDefault();e.stopImmediatePropagation();location.hash='#/login';setTimeout(()=>window.route?.(),0);}
+    }
   },true);
 
   function syncCustomerNav(){
-    const login=document.querySelector('#loginLink'),orders=document.querySelector('#ordersLink'),account=document.querySelector('#accountLink'),logout=document.querySelector('#logoutBtn');
+    const login=document.querySelector('#loginLink'),orders=document.querySelector('#ordersLink'),account=document.querySelector('#accountLink'),logout=document.querySelector('#logoutBtn'),cartNav=document.querySelector('#cartNav');
     const loggedIn=!!window.session;
-    if(login)login.hidden=loggedIn;if(orders)orders.hidden=!loggedIn;if(account)account.hidden=!loggedIn;if(logout)logout.hidden=!loggedIn;
+    if(login)login.hidden=loggedIn;
+    if(orders)orders.hidden=!loggedIn;
+    if(account)account.hidden=!loggedIn;
+    if(logout)logout.hidden=!loggedIn;
+    if(cartNav)cartNav.hidden=!loggedIn;
   }
 
   function productCard(p){
