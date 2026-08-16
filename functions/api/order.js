@@ -16,15 +16,19 @@ export async function onRequestPost({request,env}) {
   const u=await user.json(), b=await readBody(request);
   if(!Array.isArray(b.items)||!b.items.length)return json({error:"Cart is empty"},400);
   const ids=[...new Set(b.items.map(x=>x.product_id).filter(Boolean))];
-  const r=await supabase(env,`products?id=in.(${ids.map(encodeURIComponent).join(",")})&active=eq.true&approved_by_admin=eq.true&select=id,name,sku,cost_price,selling_price,stock,min_order_qty,delivery_charge`);
+  const r=await supabase(env,`products?id=in.(${ids.map(encodeURIComponent).join(",")})&active=eq.true&approved_by_admin=eq.true&select=id,name,sku,cost_price,selling_price,stock,min_order_qty,electrical_min_order_qty,delivery_charge,electrical_delivery_charge`);
   const ps=await r.json();
   if(!Array.isArray(ps))return json({error:"Unable to load products"},500);
+  const sr=await supabase(env,"admin_settings?select=delivery_enabled,default_delivery_charge,electrical_delivery_charge,free_delivery_min_amount&limit=1");
+  const settingsRows=await sr.json().catch(()=>[]);
+  const settings=Array.isArray(settingsRows)&&settingsRows[0]?settingsRows[0]:{delivery_enabled:true,default_delivery_charge:0,electrical_delivery_charge:0,free_delivery_min_amount:0};
   let subtotal=0,cost=0,totalQty=0,items=[];
   for(const line of b.items){
     const p=ps.find(x=>x.id===line.product_id),qty=Math.max(1,Number(line.quantity||1));
     if(!p)return json({error:"A product is unavailable"},400);
     if(Number(p.stock)<qty)return json({error:`Insufficient stock for ${p.name}`},400);
-    if(qty<Number(p.min_order_qty||1))return json({error:`Minimum order quantity for ${p.name} is ${p.min_order_qty||1}`},400);
+    const minimum=Math.max(1,Number(p.electrical_min_order_qty||p.min_order_qty||1));
+    if(qty<minimum)return json({error:`Minimum order quantity for ${p.name} is ${minimum}`},400);
     subtotal+=Number(p.selling_price)*qty;cost+=Number(p.cost_price)*qty;totalQty+=qty;
     items.push({product_id:p.id,product_name:p.name,sku:p.sku,quantity:qty,unit_selling_price:p.selling_price,unit_cost_price:p.cost_price,total_selling_price:Number(p.selling_price)*qty,total_cost_price:Number(p.cost_price)*qty});
   }
@@ -35,11 +39,18 @@ export async function onRequestPost({request,env}) {
     if(!offer.valid)return json({error:offer.error},400);
     discount=offer.discount_amount;offerId=offer.offer_id;offerCode=offer.code;
   }
-  const shipping=items.reduce((sum,line)=>{const p=ps.find(x=>x.id===line.product_id);return sum+Number(p?.delivery_charge||0);},0);
+  let shipping=0;
+  if(settings.delivery_enabled!==false && subtotal < Number(settings.free_delivery_min_amount||0)){
+    shipping=items.reduce((sum,line)=>{
+      const p=ps.find(x=>x.id===line.product_id);
+      const productCharge=p?.electrical_delivery_charge!=null?Number(p.electrical_delivery_charge):Number(p?.delivery_charge||0);
+      const fallback=p?.electrical_delivery_charge!=null?Number(settings.electrical_delivery_charge||0):Number(settings.default_delivery_charge||0);
+      const charge=productCharge>0?productCharge:fallback;
+      return sum+charge*Number(line.quantity||0);
+    },0);
+  }
   const total=Math.max(0,Number((subtotal-discount+shipping).toFixed(2)));
 
-  // Reserve stock atomically in PostgreSQL. This closes the race where two
-  // simultaneous checkouts could both pass the browser/API stock check.
   const reservation=await supabase(env,"rpc/reserve_product_stock",{method:"POST",body:JSON.stringify({p_items:items.map(x=>({product_id:x.product_id,quantity:x.quantity}))})});
   const reservationData=await reservation.json().catch(()=>null);
   if(!reservation.ok){
@@ -61,6 +72,6 @@ export async function onRequestPost({request,env}) {
     await supabase(env,`orders?id=eq.${encodeURIComponent(order.id)}`,{method:"DELETE"});
     return json({error:"Order created but item save failed"},500);
   }
-  await telegram(env,`🛍️ NEXORA-INDIA NEW ORDER\nOrder: ${order.order_number}\nCustomer: ${c.name}\nPhone: ${c.phone}\nAmount: ₹${total}\nDiscount: ₹${discount}\nPayment: ${order.payment_status}\nUTR: ${b.utr||"not submitted"}`);
-  return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount,stock_reserved:true});
+  await telegram(env,`🛍️ NEXORA-INDIA NEW ORDER\nOrder: ${order.order_number}\nCustomer: ${c.name}\nPhone: ${c.phone}\nAmount: ₹${total}\nDiscount: ₹${discount}\nDelivery: ₹${shipping}\nPayment: ${order.payment_status}\nUTR: ${b.utr||"not submitted"}`);
+  return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount,shipping_amount:shipping,stock_reserved:true});
 }
