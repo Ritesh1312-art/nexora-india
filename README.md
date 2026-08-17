@@ -1,47 +1,89 @@
 # Nexora-India
 
-Deploy this repository as a Cloudflare Pages project with Functions.
+Production e-commerce storefront for Cloudflare Pages + Functions + Supabase.
 
-## Required Cloudflare secrets/variables
+## Runtime configuration
 
-- SUPABASE_URL
-- SUPABASE_ANON_KEY (your Supabase Publishable key)
-- SUPABASE_SERVICE_ROLE_KEY (or Supabase Secret key)
-- ADMIN_PASSWORD
-- JWT_SECRET
-- CJ_API_KEY (preferred; the server automatically obtains the CJ access token)
-- CJ_ACCESS_TOKEN (legacy/fallback only)
-- CJ_USD_INR_RATE (optional, defaults to 90)
-- TELEGRAM_BOT_TOKEN
-- TELEGRAM_CHAT_ID
+Required Cloudflare secrets/variables:
 
-Optional DeoDap feed/collection variables:
-- DEODAP_DAILY_COLLECTIONS
-- DEODAP_JEWELLERY_COLLECTIONS
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY` (Supabase Publishable key)
+- `SUPABASE_SERVICE_ROLE_KEY` (or Supabase Secret key)
+- `ADMIN_PASSWORD`
+- `JWT_SECRET`
+- `CJ_API_KEY` (preferred)
+- `CJ_ACCESS_TOKEN` (legacy fallback)
+- `CJ_USD_INR_RATE` (optional, default 90)
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 
-Never commit the Supabase Secret/service-role key, CJ token/API key, Telegram token, or ADMIN_PASSWORD to GitHub.
+Optional DeoDap variables:
 
-## Supabase
+- `DEODAP_DAILY_COLLECTIONS`
+- `DEODAP_JEWELLERY_COLLECTIONS`
 
-The database schema for this build is the Nexora-India schema created in Supabase SQL Editor. The browser uses the Publishable key; privileged writes happen in Pages Functions using the server-side secret.
+Never commit service-role/secret keys, supplier credentials, Telegram credentials or admin password to GitHub.
+
+## Production storefront
+
+`index.html` now loads one canonical customer application (`store-v2.js` + `store-v2.css`). It provides:
+
+- Homepage, categories, search, filtering and sorting
+- Product detail, gallery, variants, stock and pricing
+- Guest cart with persistent local storage
+- Authenticated checkout with server-side price/stock validation
+- UPI intent/QR presentation and manual UTR verification
+- Customer orders, payment history, addresses, wishlist and notifications
+- Password reset and optional TOTP MFA enrollment/challenge
+- Product reviews restricted to verified purchases and admin moderation
+- Support tickets and privacy/account-deletion requests
+- Shipping/returns/privacy/terms/contact/cancellation pages
+- Responsive mobile/desktop UI and production security headers
+
+## Admin console
+
+`admin.html` now loads the canonical operations console (`admin-v2.js` + `admin-v2.css`) with:
+
+- Dashboard statistics
+- Product publishing, pricing, stock and variants
+- Payment verification/rejection
+- Supplier/shipping tracking updates
+- Users and account blocking
+- Categories and SEO fields
+- Review moderation
+- Support ticket status
+- Offers
+- Store/payment/delivery settings
+- CJ and DeoDap supplier sync
+
+Admin operations use HttpOnly JWT authentication and server-side Supabase secrets.
+
+## Database hardening
+
+The production migrations add:
+
+- Variant-aware atomic stock reservation/release
+- Automatic `payment_records` synchronization from order payment state
+- Verified-purchase review validation
+- Review moderation/RLS
+- One-default-address uniqueness
+- Least-privilege customer RLS cleanup
+- Removal of unnecessary public execution for backend-only stock/payment helpers
+- Required indexes for review/order relationships
 
 ## Supplier routing
 
 - CJ → Footwear + Kitchen Appliances
 - DeoDap → Daily Use Products + Artificial Jewellery
-- Supplier syncs never intentionally cross these category mappings.
-- Imported supplier products remain unpublished until admin review.
+- Supplier imports remain unpublished until admin review.
+- Supplier integrations do not bypass CAPTCHA, login controls, robots restrictions or supplier terms.
 
-## Supplier sync
+## Payment model
 
-- CJ uses the official API 2.0 authentication flow. If `CJ_API_KEY` is configured, the server obtains the access token automatically; `CJ_ACCESS_TOKEN` is retained only as a fallback.
-- DeoDap uses the public catalog collections by default. For a private/approved dropshipping CSV or JSON feed, configure `DEODAP_FEED_URL` in a future feed-specific integration rather than bypassing login/CAPTCHA/robots restrictions.
-- Current DeoDap public-catalog sync is intended for product discovery/import; wholesale/drop-shipping cost data should come from an authorized DeoDap feed when available.
+UPI is intentionally manual-UTR verification because a plain UPI ID cannot independently confirm bank settlement. The storefront can present a configured UPI ID, UPI intent and QR; admin verifies the submitted UTR before fulfilment.
 
-## Important current limitations
+The store's real UPI ID must be entered in **Admin → Settings** before the QR/UPI payment panel can show a live destination. No placeholder UPI ID is hard-coded.
 
-- UPI is intentionally UTR/manual verification. A plain UPI ID does not provide automatic bank confirmation.
-- Supplier-imported products stay unpublished until admin review.
-- DeoDap integration does not bypass CAPTCHA, login controls, robots restrictions, or supplier terms.
-- Admin authentication is password-only via an HttpOnly cookie signed with JWT_SECRET.
-- Favicon/banner are intentionally placeholders and can be added later.
+## Final external security setting
+
+Supabase Security Advisor currently reports only one remaining project-level item: **Leaked Password Protection is disabled**. This is an Auth dashboard setting rather than a database/function setting; enable it under Supabase Authentication password security before public launch. Supabase documents this protection as a HaveIBeenPwned-backed check against compromised passwords. citeturn0search0turn0search1
