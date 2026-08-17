@@ -86,4 +86,4 @@ The store's real UPI ID must be entered in **Admin → Settings** before the QR/
 
 ## Final external security setting
 
-Supabase Security Advisor currently reports only one remaining project-level item: **Leaked Password Protection is disabled**. This is an Auth dashboard setting rather than a database/function setting; enable it under Supabase Authentication password security before public launch. Supabase documents this protection as a HaveIBeenPwned-backed check against compromised passwords. citeturn0search0turn0search1
+Supabase Security Advisor currently reports only one remaining project-level item: **Leaked Password Protection is disabled**. This is an Auth dashboard setting rather than a database/function setting; enable it under Supabase Authentication password security before public launch. Supabase documents this protection as a HaveIBeenPwned-backed check against compromised passwords.
