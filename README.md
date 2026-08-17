@@ -26,12 +26,13 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 
 ## Production storefront
 
-`index.html` now loads one canonical customer application (`store-v2.js` + `store-v2.css`). It provides:
+`index.html` loads the canonical customer application (`store-v2.js` + `store-v2.css`) plus a small guest-checkout bridge. It provides:
 
 - Homepage, categories, search, filtering and sorting
 - Product detail, gallery, variants, stock and pricing
-- Guest cart with persistent local storage
+- Persistent guest cart with local storage
 - Authenticated checkout with server-side price/stock validation
+- Optional guest checkout when enabled in Admin → Settings
 - UPI intent/QR presentation and manual UTR verification
 - Customer orders, payment history, addresses, wishlist and notifications
 - Password reset and optional TOTP MFA enrollment/challenge
@@ -42,12 +43,13 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 
 ## Admin console
 
-`admin.html` now loads the canonical operations console (`admin-v2.js` + `admin-v2.css`) with:
+`admin.html` loads the canonical operations console (`admin-v2.js` + `admin-v2.css`) and product editor bridges with:
 
 - Dashboard statistics
 - Product publishing, pricing, stock and variants
+- Add/edit product with Gemini-assisted descriptions
 - Payment verification/rejection
-- Supplier/shipping tracking updates
+- Supplier/shipping tracking updates with server-side status validation
 - Users and account blocking
 - Categories and SEO fields
 - Review moderation
@@ -70,6 +72,8 @@ The production migrations add:
 - Least-privilege customer RLS cleanup
 - Removal of unnecessary public execution for backend-only stock/payment helpers
 - Required indexes for review/order relationships
+- Stale unpaid-order reservation expiry every five minutes
+- Offer usage committed only when payment is actually verified, with concurrency-safe limits
 
 ## Supplier routing
 
@@ -77,6 +81,7 @@ The production migrations add:
 - DeoDap → Daily Use Products + Artificial Jewellery
 - Supplier imports remain unpublished until admin review.
 - Supplier integrations do not bypass CAPTCHA, login controls, robots restrictions or supplier terms.
+- Supplier auto-sync is not assumed to be running unless a scheduler is explicitly configured; manual supplier sync remains available from Admin.
 
 ## Payment model
 
@@ -86,4 +91,4 @@ The store's real UPI ID must be entered in **Admin → Settings** before the QR/
 
 ## Final external security setting
 
-Supabase Security Advisor currently reports only one remaining project-level item: **Leaked Password Protection is disabled**. This is an Auth dashboard setting rather than a database/function setting; enable it under Supabase Authentication password security before public launch. Supabase documents this protection as a HaveIBeenPwned-backed check against compromised passwords.
+Supabase Security Advisor currently reports one remaining project-level item: **Leaked Password Protection is disabled**. This is an Auth dashboard setting rather than a database/function setting; enable it under Supabase Authentication password security before public launch. Supabase documents this protection as a HaveIBeenPwned-backed check against compromised passwords.
