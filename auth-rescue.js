@@ -1,23 +1,71 @@
-/* Nexora-India authoritative email/password authentication flow. */
+/* Nexora-India customer authentication UI. Uses the SAME Supabase client/session as app.js. */
 (function(){
-  const OTP_LENGTH=8;
-  let clientPromise=null, renderedHash=null;
   const $=s=>document.querySelector(s);
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const inputStyle='width:100%;box-sizing:border-box;pointer-events:auto;touch-action:manipulation;user-select:text;-webkit-user-select:text;opacity:1;display:block;';
-  async function client(){if(!clientPromise)clientPromise=fetch('/api/config',{cache:'no-store'}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok||!d.url||!d.key)throw new Error('Authentication configuration is unavailable.');return supabase.createClient(d.url,d.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}})});return clientPromise}
-  function nav(){const logged=!!window.session;['cartNav','accountLink','logoutBtn'].forEach(id=>{const el=$('#'+id);if(el)el.hidden=!logged});const login=$('#loginLink');if(login)login.hidden=logged;const orders=$('#ordersLink');if(orders)orders.hidden=true}
-  function notice(id,text,type='error'){const m=$(id);if(m)m.innerHTML=`<div class="notice ${type}">${esc(text)}</div>`}
-  function shell(title,body){const app=$('#app');if(!app)return;app.innerHTML=`<div class="container"><div class="panel" style="max-width:520px;margin:32px auto"><h2 style="margin-top:0">${title}</h2><div style="display:flex;gap:8px;margin:0 0 20px"><a href="#/login" class="btn ${location.hash==='#/login'?'':'secondary'}" style="flex:1;text-align:center">Login</a><a href="#/register" class="btn ${location.hash==='#/register'?'':'secondary'}" style="flex:1;text-align:center">Register</a></div>${body}</div></div>`}
-  function renderLogin(){
-    shell('Login to Nexora-India',`<div class="field"><label for="rescueEmail">Email</label><input id="rescueEmail" class="input" style="${inputStyle}" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false"></div><div class="field"><label for="rescuePassword">Password</label><input id="rescuePassword" class="input" style="${inputStyle}" type="password" autocomplete="current-password"></div><label for="rememberMe" style="display:flex;align-items:center;gap:8px;margin:8px 0 16px;cursor:pointer"><input id="rememberMe" type="checkbox" style="width:18px;height:18px;cursor:pointer"><span>Remember me</span></label><button id="rescueLogin" type="button" class="btn" style="width:100%">Login</button><div style="margin-top:14px;text-align:center"><a href="#/forgot">Forgot password?</a></div><div id="rescueMsg"></div>`);
-    const login=async()=>{const b=$('#rescueLogin');try{const email=$('#rescueEmail').value.trim(),password=$('#rescuePassword').value;if(!email||!password)return notice('#rescueMsg','Enter your email and password.');b.disabled=true;b.textContent='Logging in…';const s=await client();const r=await s.auth.signInWithPassword({email,password});if(r.error)throw r.error;const current=r.data.session||(await s.auth.getSession()).data.session;if(!current)throw new Error('Login succeeded but no active session was returned.');window.session=current;nav();location.hash='#/';setTimeout(()=>window.route?.(),0)}catch(e){notice('#rescueMsg',e.message)}finally{b.disabled=false;b.textContent='Login'}};
-    $('#rescueLogin').onclick=login;$('#rescueEmail').onkeydown=e=>{if(e.key==='Enter')login()};$('#rescuePassword').onkeydown=e=>{if(e.key==='Enter')login()};
+  function client(){return window.sb||null}
+  function sync(){window.refreshNav?.()}
+  function store(){
+    sync();
+    if(location.hash!=='#/')history.replaceState(null,'','#/');
+    if(typeof window.renderHome==='function')window.renderHome();else window.route?.();
   }
-  function renderRegister(){shell('Create Nexora-India account',`<div class="field"><label>Full name</label><input id="rescueName" class="input" style="${inputStyle}" autocomplete="name"></div><div class="field"><label>Mobile</label><input id="rescuePhone" class="input" style="${inputStyle}" type="tel" inputmode="tel" autocomplete="tel"></div><div class="field"><label>Email</label><input id="rescueEmail" class="input" style="${inputStyle}" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false"></div><div class="field"><label>Password</label><input id="rescuePassword" class="input" style="${inputStyle}" type="password" minlength="8" autocomplete="new-password"></div><button id="rescueRegister" type="button" class="btn" style="width:100%">Register</button><div id="rescueMsg"></div>`);$('#rescueRegister').onclick=async()=>{const b=$('#rescueRegister');try{const email=$('#rescueEmail').value.trim(),password=$('#rescuePassword').value,name=$('#rescueName').value.trim(),phone=$('#rescuePhone').value.trim();if(!email||!password)return notice('#rescueMsg','Email and password are required.');if(password.length<8)return notice('#rescueMsg','Password must be at least 8 characters.');b.disabled=true;b.textContent='Creating account…';const s=await client(),r=await s.auth.signUp({email,password,options:{data:{full_name:name,phone}}});if(r.error)throw r.error;if(r.data.user&&Array.isArray(r.data.user.identities)&&r.data.user.identities.length===0){notice('#rescueMsg','This email is already registered. Please use Login instead.');return}if(r.data.session){window.session=r.data.session;nav();location.hash='#/';setTimeout(()=>window.route?.(),0);return}renderVerifySignup(s,email)}catch(e){notice('#rescueMsg',e.message)}finally{b.disabled=false;b.textContent='Register'}}}
-  function renderVerifySignup(s,email){const app=$('#app');app.innerHTML=`<div class="container"><div class="panel" style="max-width:520px;margin:32px auto"><h2>Verify your email</h2><p>We sent an ${OTP_LENGTH}-digit verification code to <b>${esc(email)}</b>.</p><div class="field"><label for="rescueOtp">${OTP_LENGTH}-digit OTP</label><input id="rescueOtp" class="input" style="${inputStyle}" inputmode="numeric" maxlength="${OTP_LENGTH}" autocomplete="one-time-code"></div><div style="display:flex;gap:8px"><button id="rescueVerify" type="button" class="btn" style="flex:1">Verify email</button><button id="resendSignup" type="button" class="btn secondary" style="flex:1">Resend OTP</button></div><div id="rescueMsg"></div><p id="resendHint" style="font-size:.9em;opacity:.75"></p></div></div>`;let busy=false,cooldownTimer=null;const resend=$('#resendSignup'),hint=$('#resendHint');function startCooldown(){let left=60;resend.disabled=true;resend.textContent=`Resend OTP (${left}s)`;hint.textContent='Please wait before requesting another code.';clearInterval(cooldownTimer);cooldownTimer=setInterval(()=>{left--;if(left<=0){clearInterval(cooldownTimer);resend.disabled=false;resend.textContent='Resend OTP';hint.textContent=''}else resend.textContent=`Resend OTP (${left}s)`},1000)}resend.onclick=async()=>{if(busy||resend.disabled)return;busy=true;try{const r=await s.auth.resend({type:'signup',email});if(r.error)throw r.error;notice('#rescueMsg','A new verification OTP has been sent to your email.','success');startCooldown()}catch(e){notice('#rescueMsg',e.message)}finally{busy=false}};$('#rescueVerify').onclick=async()=>{try{const code=$('#rescueOtp').value.trim();if(!new RegExp(`^\\d{${OTP_LENGTH}}$`).test(code))return notice('#rescueMsg',`Enter the ${OTP_LENGTH}-digit OTP.`);const x=await s.auth.verifyOtp({email,token:code,type:'email'});if(x.error)throw x.error;window.session=x.data.session;nav();location.hash='#/';setTimeout(()=>window.route?.(),0)}catch(e){notice('#rescueMsg',e.message)}}}
-  function renderForgot(){shell('Reset password',`<div class="field"><label>Email</label><input id="rescueEmail" class="input" style="${inputStyle}" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false"></div><button id="rescueReset" type="button" class="btn" style="width:100%">Send reset email</button><div id="rescueMsg"></div>`);$('#rescueReset').onclick=async()=>{try{const email=$('#rescueEmail').value.trim();if(!email)return notice('#rescueMsg','Enter your registered email.');const s=await client(),r=await s.auth.resetPasswordForEmail(email,{redirectTo:location.origin+'/#/forgot'});if(r.error)throw r.error;notice('#rescueMsg','Password reset email sent. Check your inbox.','success')}catch(e){notice('#rescueMsg',e.message)}}}
-  async function routeAuth(){nav();const h=location.hash||'';const isAuthRoute=['#/login','#/register','#/forgot'].includes(h);if(!isAuthRoute){renderedHash=null;return}if(window.session){renderedHash=null;if(h!=='#/')location.hash='#/';return}if(renderedHash===h)return;renderedHash=h;if(h==='#/login')renderLogin();else if(h==='#/register')renderRegister();else renderForgot()}
-  document.addEventListener('click',e=>{const el=e.target.closest('a,button');if(!el)return;const href=(el.getAttribute('href')||'').toLowerCase();if(href==='#/login'||href==='#/register'||href==='#/forgot'||el.id==='loginLink'){e.preventDefault();e.stopImmediatePropagation();const target=el.id==='loginLink'?'#/login':href;if(window.session){location.hash='#/';return}if(location.hash===target){renderedHash=null;routeAuth()}else location.hash=target}},true);
-  window.addEventListener('hashchange',()=>setTimeout(routeAuth,0));setTimeout(routeAuth,900);
+  function notice(text,type='error'){const m=$('#authMsg');if(m)m.innerHTML=`<div class="notice ${type}">${esc(text)}</div>`}
+  function shell(title,body){
+    const app=$('#app');if(!app)return;
+    app.innerHTML=`<div class="container"><div class="panel" style="max-width:520px;margin:32px auto"><h2 style="margin-top:0">${title}</h2><div style="display:flex;gap:8px;margin:0 0 20px"><button id="loginMode" class="btn" style="flex:1">Login</button><button id="registerMode" class="btn secondary" style="flex:1">Register</button></div>${body}</div></div>`;
+    $('#loginMode').onclick=()=>{history.replaceState(null,'','#/login');renderLogin()};
+    $('#registerMode').onclick=()=>{history.replaceState(null,'','#/register');renderRegister()};
+  }
+  function renderLogin(){
+    if(window.session){store();return}
+    shell('Login to Nexora-India',`<div class="field"><label>Email</label><input id="authEmail" class="input" style="${inputStyle}" type="email" autocomplete="email" inputmode="email"></div><div class="field"><label>Password</label><input id="authPassword" class="input" style="${inputStyle}" type="password" autocomplete="current-password"></div><label style="display:flex;align-items:center;gap:8px;margin:8px 0 16px"><input type="checkbox" id="rememberMe" style="width:18px;height:18px"><span>Remember me</span></label><button id="authLogin" class="btn" type="button" style="width:100%">Login</button><div style="margin-top:14px;text-align:center"><a href="#/forgot">Forgot password?</a></div><div id="authMsg"></div>`);
+    const submit=async()=>{
+      const b=$('#authLogin'),s=client();
+      if(!s){notice('Authentication service is not ready.');return}
+      const email=$('#authEmail').value.trim(),password=$('#authPassword').value;
+      if(!email||!password){notice('Enter your email and password.');return}
+      b.disabled=true;b.textContent='Logging in…';
+      try{
+        const r=await s.auth.signInWithPassword({email,password});
+        if(r.error)throw r.error;
+        const current=r.data.session||(await s.auth.getSession()).data.session;
+        if(!current)throw new Error('Login succeeded but no active session was returned.');
+        window.session=current;window.sb=s;sync();store();
+      }catch(e){notice(e.message||'Login failed.')}finally{b.disabled=false;b.textContent='Login'}
+    };
+    $('#authLogin').onclick=submit;
+    $('#authEmail').onkeydown=e=>{if(e.key==='Enter')submit()};
+    $('#authPassword').onkeydown=e=>{if(e.key==='Enter')submit()};
+  }
+  function renderRegister(){
+    if(window.session){store();return}
+    shell('Create Nexora-India account',`<div class="field"><label>Full name</label><input id="regName" class="input" style="${inputStyle}"></div><div class="field"><label>Mobile</label><input id="regPhone" class="input" style="${inputStyle}" type="tel" inputmode="tel"></div><div class="field"><label>Email</label><input id="regEmail" class="input" style="${inputStyle}" type="email" autocomplete="email"></div><div class="field"><label>Password</label><input id="regPassword" class="input" style="${inputStyle}" type="password" minlength="8" autocomplete="new-password"></div><button id="registerBtn" class="btn" type="button" style="width:100%">Register</button><div id="authMsg"></div>`);
+    $('#registerBtn').onclick=async()=>{
+      const b=$('#registerBtn'),s=client();
+      if(!s){notice('Authentication service is not ready.');return}
+      const email=$('#regEmail').value.trim(),password=$('#regPassword').value;
+      if(!email||!password){notice('Email and password are required.');return}
+      if(password.length<8){notice('Password must be at least 8 characters.');return}
+      b.disabled=true;b.textContent='Creating account…';
+      try{
+        const r=await s.auth.signUp({email,password,options:{data:{full_name:$('#regName').value.trim(),phone:$('#regPhone').value.trim()}}});
+        if(r.error)throw r.error;
+        if(r.data.session){window.session=r.data.session;window.sb=s;sync();store();return}
+        notice('Registration submitted. Check your email for confirmation if email verification is enabled.','success');
+      }catch(e){notice(e.message||'Registration failed.')}finally{b.disabled=false;b.textContent='Register'}
+    };
+  }
+  function renderForgot(){
+    if(window.session){store();return}
+    shell('Reset password',`<div class="field"><label>Email</label><input id="forgotEmail" class="input" style="${inputStyle}" type="email" autocomplete="email"></div><button id="forgotBtn" class="btn" type="button" style="width:100%">Send reset email</button><div id="authMsg"></div>`);
+    $('#forgotBtn').onclick=async()=>{try{const s=client();if(!s)throw new Error('Authentication service is not ready.');const email=$('#forgotEmail').value.trim();if(!email)throw new Error('Enter your registered email.');const r=await s.auth.resetPasswordForEmail(email,{redirectTo:location.origin+'/#/forgot'});if(r.error)throw r.error;notice('Password reset email sent. Check your inbox.','success')}catch(e){notice(e.message||'Unable to send reset email.')}};
+  }
+  function routeAuth(){
+    const h=location.hash||'#/';
+    if(window.session&&(h==='#/login'||h==='#/register'||h==='#/forgot')){store();return}
+    if(h==='#/login')renderLogin();else if(h==='#/register')renderRegister();else if(h==='#/forgot')renderForgot();
+  }
+  window.renderLogin=renderLogin;window.renderRegister=renderRegister;window.renderForgot=renderForgot;
+  window.addEventListener('hashchange',routeAuth);setTimeout(routeAuth,0);
 })();
