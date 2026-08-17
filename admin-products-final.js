@@ -1,31 +1,135 @@
-/* Nexora-India Phase 1 — authoritative Admin > Products controller. */
+/* Nexora-India Phase 1 — single authoritative Products manager. */
 (function(){
 'use strict';
 const $=(s,r=document)=>r.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=n=>'₹'+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2});
-let products=[],cats=[],busy=false;
 const db=()=>window.sb;
-const ready=()=>!!(db()&&window.session?.user?.id);
-async function load(){if(!ready())throw Error('Admin session is not ready.');const [a,b]=await Promise.all([db().from('products').select('*').order('created_at',{ascending:false}).limit(200),db().from('categories').select('id,name,active,sort_order').eq('active',true).order('sort_order').order('name')]);if(a.error)throw a.error;if(b.error)throw b.error;products=a.data||[];cats=b.data||[]}
+let products=[],cats=[],busy=false,installedLegacyHook=false;
+
+function container(){return $('#adminPanel')||$('#adminTab')}
+function productButton(){return $('.admin-tabs button[data-tab="products"]')||[...document.querySelectorAll('.tabs button')].find(b=>b.textContent.trim().toLowerCase()==='products')}
+function isProductsSelected(){
+ const modern=$('.admin-tabs button[data-tab="products"]');
+ if(modern)return modern.classList.contains('active');
+ const legacy=$('#adminTab');
+ return !!legacy;
+}
+async function ensureSession(){
+ if(window.session?.user?.id)return window.session;
+ if(!db())throw Error('Authentication service is not ready.');
+ const r=await db().auth.getSession();
+ if(r.error)throw r.error;
+ window.session=r.data.session;
+ if(!window.session?.user?.id)throw Error('Admin session is not ready. Please log in again.');
+ return window.session;
+}
+async function load(){
+ await ensureSession();
+ const [a,b]=await Promise.all([
+  db().from('products').select('*').order('created_at',{ascending:false}).limit(500),
+  db().from('categories').select('id,name,active,sort_order').eq('active',true).order('sort_order').order('name')
+ ]);
+ if(a.error)throw a.error;if(b.error)throw b.error;
+ products=a.data||[];cats=b.data||[];
+}
 const cn=id=>cats.find(c=>String(c.id)===String(id))?.name||'Uncategorized';
-function rows(list){if(!list.length)return '<tr><td colspan="8"><div class="panel">No products found.</div></td></tr>';return list.map(p=>`<tr><td>${p.image_url?`<img src="${esc(p.image_url)}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px">`:'—'}</td><td><b>${esc(p.name||'Unnamed')}</b><br><span class="muted">${esc(p.sku||'No SKU')}</span></td><td>${esc(cn(p.category_id))}</td><td>${money(p.selling_price)}<br><span class="muted">MRP ${money(p.mrp)}</span></td><td>${Number(p.stock)||0}</td><td>${p.active?'Active':'Hidden'} · ${p.approved_by_admin?'Live':'Draft'}</td><td>${p.featured?'Yes':'No'}</td><td><button class="btn small" data-p1-edit="${esc(p.id)}" type="button">Edit</button> <button class="btn small secondary" data-p1-toggle="${esc(p.id)}" type="button">${p.active?'Hide':'Show'}</button></td></tr>`).join('')}
-function message(t,type='success'){const e=$('#p1Msg');if(e)e.innerHTML=`<div class="notice ${type}">${esc(t)}</div>`}
-function render(){const p=$('#adminPanel');if(!p)return;p.innerHTML=`<div class="between"><div><h2>Products</h2><p class="muted">Phase 1 — complete product creation, editing, Gemini descriptions and publishing.</p></div><button id="p1AddProduct" class="btn" type="button">+ Add Product</button></div><div id="p1Msg"></div><div class="admin-toolbar"><input id="p1Search" class="input" placeholder="Search name, SKU or category…"><button id="p1Reload" class="btn secondary" type="button">Reload</button></div><div class="table-scroll"><table class="admin-table"><thead><tr><th>Image</th><th>Product</th><th>Category</th><th>Price</th><th>Stock</th><th>Status</th><th>Featured</th><th>Action</th></tr></thead><tbody id="p1Rows">${rows(products)}</tbody></table></div>`;$('#p1AddProduct').onclick=()=>editor(null);$('#p1Reload').onclick=()=>refresh(true);$('#p1Search').oninput=e=>{const q=e.target.value.toLowerCase().trim();$('#p1Rows').innerHTML=rows(products.filter(x=>(`${x.name||''} ${x.sku||''} ${cn(x.category_id)}`).toLowerCase().includes(q)));bind()};bind()}
-function bind(){document.querySelectorAll('[data-p1-edit]').forEach(b=>b.onclick=()=>editor(b.dataset.p1Edit));document.querySelectorAll('[data-p1-toggle]').forEach(b=>b.onclick=async()=>{const p=products.find(x=>String(x.id)===String(b.dataset.p1Toggle));if(!p)return;const r=await db().from('products').update({active:!p.active,approved_by_admin:!p.active}).eq('id',p.id);if(r.error)message(r.error.message,'error');else refresh(true)})}
-async function refresh(force=false){if(busy&&!force)return;busy=true;try{await load();render()}catch(e){const p=$('#adminPanel');if(p)p.innerHTML=`<div class="notice error">${esc(e.message||'Unable to load products.')}</div>`}finally{busy=false}}
-function form(p){const x=p||{};return `<div id="p1Modal" class="modal-backdrop"><div class="modal-card" style="max-width:940px;width:94vw;max-height:92vh;overflow:auto"><div class="between"><div><span class="section-kicker">PHASE 1</span><h2>${p?'Edit Product':'Add Product'}</h2></div><button id="p1Close" class="btn secondary" type="button">Close</button></div><div id="p1EditorMsg"></div><div class="admin-form"><div class="field full"><label>Product Name *</label><input id="p1Name" class="input" value="${esc(x.name)}"></div><div class="field"><label>SKU</label><input id="p1Sku" class="input" value="${esc(x.sku)}"></div><div class="field"><label>Category *</label><select id="p1Category" class="input"><option value="">Select category</option>${cats.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(x.category_id)?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>MRP ₹</label><input id="p1Mrp" class="input" type="number" min="0" step="0.01" value="${x.mrp??''}"></div><div class="field"><label>Selling Price ₹ *</label><input id="p1Price" class="input" type="number" min="0" step="0.01" value="${x.selling_price??''}"></div><div class="field"><label>Stock *</label><input id="p1Stock" class="input" type="number" min="0" value="${x.stock??0}"></div><div class="field full"><label>Product Image URL</label><input id="p1Image" class="input" value="${esc(x.image_url)}" placeholder="Public image URL"></div><div class="field full"><label>Description</label><div style="display:flex;gap:8px;align-items:flex-start"><textarea id="p1Desc" class="input" rows="14" style="flex:1">${esc(x.description)}</textarea><button id="p1Gemini" class="btn" type="button">✨ Generate with Gemini</button></div><small class="muted">Gemini analyses the supplied product information and accessible image. Review before saving.</small></div><div class="field"><label><input id="p1Featured" type="checkbox" ${x.featured?'checked':''}> Featured</label></div><div class="field"><label><input id="p1Active" type="checkbox" ${x.active?'checked':''}> Active</label></div><div class="field"><label><input id="p1Approved" type="checkbox" ${x.approved_by_admin?'checked':''}> Approved / Live</label></div></div><div class="admin-actions"><button id="p1Draft" class="btn secondary" type="button">Save Draft</button><button id="p1Live" class="btn" type="button">Save & Live</button></div></div></div>`}
-async function editor(id){if(!ready()){alert('Admin session is not ready.');return}const p=id?products.find(x=>String(x.id)===String(id)):null;if(id&&!p){alert('Product not found.');return}$('#p1Modal')?.remove();const w=document.createElement('div');w.innerHTML=form(p);document.body.appendChild(w.firstElementChild);const m=$('#p1Modal');$('#p1Close').onclick=()=>m.remove();m.addEventListener('click',e=>{if(e.target===m)m.remove()});$('#p1Draft').onclick=()=>save(p,false);$('#p1Live').onclick=()=>save(p,true);$('#p1Gemini').onclick=()=>gemini(p)}
-async function gemini(p){const b=$('#p1Gemini'),m=$('#p1EditorMsg');b.disabled=true;b.textContent='Generating…';m.innerHTML='<div class="notice">Gemini is analyzing the product…</div>';try{const s=window.session?.access_token?window.session:(await db().auth.getSession()).data.session;if(!s)throw Error('Admin session expired.');const product={...(p||{}),name:$('#p1Name').value.trim(),sku:$('#p1Sku').value.trim(),category_name:$('#p1Category').selectedOptions[0]?.textContent||'',image_url:$('#p1Image').value.trim(),description:$('#p1Desc').value.trim(),mrp:$('#p1Mrp').value,selling_price:$('#p1Price').value,stock:$('#p1Stock').value};const r=await fetch('/api/generate-product-description',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${s.access_token}`},body:JSON.stringify({product})});const d=await r.json();if(!r.ok)throw Error(d.error||'Gemini generation failed.');$('#p1Desc').value=d.description||'';m.innerHTML='<div class="notice">Description generated. Review before saving.</div>'}catch(e){m.innerHTML=`<div class="notice error">${esc(e.message||'Generation failed.')}</div>`}finally{b.disabled=false;b.textContent='✨ Generate with Gemini'}}
-async function save(p,live){const m=$('#p1EditorMsg'),name=$('#p1Name').value.trim(),category_id=$('#p1Category').value,price=Number($('#p1Price').value),stock=Number($('#p1Stock').value);if(!name)return m.innerHTML='<div class="notice error">Product name is required.</div>';if(!category_id)return m.innerHTML='<div class="notice error">Please select a category.</div>';if(!Number.isFinite(price)||price<0)return m.innerHTML='<div class="notice error">Enter a valid selling price.</div>';if(!Number.isInteger(stock)||stock<0)return m.innerHTML='<div class="notice error">Enter a valid stock quantity.</div>';const b=live?$('#p1Live'):$('#p1Draft');b.disabled=true;b.textContent='Saving…';const payload={name,sku:$('#p1Sku').value.trim()||null,category_id,mrp:Math.max(0,Number($('#p1Mrp').value)||0),selling_price:price,stock,image_url:$('#p1Image').value.trim()||null,description:$('#p1Desc').value.trim()||null,featured:$('#p1Featured').checked,active:live?true:$('#p1Active').checked,approved_by_admin:live?true:$('#p1Approved').checked};try{const r=p?await db().from('products').update(payload).eq('id',p.id):await db().from('products').insert(payload).select('id').single();if(r.error)throw r.error;m.innerHTML=`<div class="notice">${live?'Product saved and LIVE.':p?'Product updated.':'Product saved as draft.'}</div>`;setTimeout(()=>{$('#p1Modal')?.remove();refresh(true)},600)}catch(e){m.innerHTML=`<div class="notice error">${esc(e.message||'Save failed.')}</div>`}finally{b.disabled=false;b.textContent=live?'Save & Live':'Save Draft'}}
-function productsTab(){return $('.admin-tabs button[data-tab="products"]')}
-function isActive(){const b=productsTab();return !!(b&&b.classList.contains('active'))}
-function takeControl(){const b=productsTab();if(!b)return false;b.classList.add('active');document.querySelectorAll('.admin-tabs button').forEach(x=>{if(x!==b)x.classList.remove('active')});refresh(true);return true}
+function rows(list){
+ if(!list.length)return '<tr><td colspan="8"><div class="panel">No products found.</div></td></tr>';
+ return list.map(p=>`<tr>
+ <td>${p.image_url?`<img src="${esc(p.image_url)}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px">`:'—'}</td>
+ <td><b>${esc(p.name||'Unnamed')}</b><br><span class="muted">${esc(p.sku||'No SKU')}</span></td>
+ <td>${esc(cn(p.category_id))}</td>
+ <td>${money(p.selling_price)}<br><span class="muted">MRP ${money(p.mrp)}</span></td>
+ <td>${Number(p.stock)||0}</td>
+ <td>${p.active?'Active':'Hidden'} · ${p.approved_by_admin?'Live':'Draft'}</td>
+ <td>${p.featured?'Yes':'No'}</td>
+ <td><button class="btn small" data-p1-edit="${esc(p.id)}" type="button">Edit</button> <button class="btn small secondary" data-p1-toggle="${esc(p.id)}" type="button">${p.active?'Hide':'Show'}</button></td>
+ </tr>`).join('');
+}
+function render(){
+ const p=container();if(!p)return;
+ p.innerHTML=`<div class="between"><div><h2>Products</h2><p class="muted">Add, edit, review, publish and manage every store product.</p></div><button id="p1AddProduct" class="btn" type="button">+ Add Product</button></div>
+ <div id="p1Msg"></div>
+ <div class="admin-toolbar"><input id="p1Search" class="input" placeholder="Search name, SKU or category…"><button id="p1Reload" class="btn secondary" type="button">Reload</button></div>
+ <div class="table-scroll"><table class="admin-table"><thead><tr><th>Image</th><th>Product</th><th>Category</th><th>Price</th><th>Stock</th><th>Status</th><th>Featured</th><th>Action</th></tr></thead><tbody id="p1Rows">${rows(products)}</tbody></table></div>`;
+ $('#p1AddProduct').onclick=()=>editor(null);$('#p1Reload').onclick=()=>refresh(true);
+ $('#p1Search').oninput=e=>{const q=e.target.value.toLowerCase().trim();$('#p1Rows').innerHTML=rows(products.filter(x=>(`${x.name||''} ${x.sku||''} ${cn(x.category_id)}`).toLowerCase().includes(q)));bind()};bind();
+}
+function bind(){
+ document.querySelectorAll('[data-p1-edit]').forEach(b=>b.onclick=()=>editor(b.dataset.p1Edit));
+ document.querySelectorAll('[data-p1-toggle]').forEach(b=>b.onclick=async()=>{
+  const p=products.find(x=>String(x.id)===String(b.dataset.p1Toggle));if(!p)return;
+  b.disabled=true;
+  const r=await db().from('products').update({active:!p.active,approved_by_admin:!p.active}).eq('id',p.id);
+  if(r.error)show(r.error.message,'error');else await refresh(true);
+ });
+}
+function show(t,type='success'){const e=$('#p1Msg');if(e)e.innerHTML=`<div class="notice ${type}">${esc(t)}</div>`}
+async function refresh(force=false){if(busy&&!force)return;busy=true;try{await load();render()}catch(e){const p=container();if(p)p.innerHTML=`<div class="notice error">${esc(e.message||'Unable to load products.')}</div>`}finally{busy=false}}
+function form(p){
+ const x=p||{};
+ return `<div id="p1Modal" class="modal-backdrop"><div class="modal-card" style="max-width:940px;width:94vw;max-height:92vh;overflow:auto"><div class="between"><div><span class="section-kicker">PHASE 1</span><h2>${p?'Edit Product':'Add Product'}</h2></div><button id="p1Close" class="btn secondary" type="button">Close</button></div><div id="p1EditorMsg"></div>
+ <div class="admin-form">
+ <div class="field full"><label>Product Name *</label><input id="p1Name" class="input" value="${esc(x.name)}"></div>
+ <div class="field"><label>SKU</label><input id="p1Sku" class="input" value="${esc(x.sku)}"></div>
+ <div class="field"><label>Category *</label><select id="p1Category" class="input"><option value="">Select category</option>${cats.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(x.category_id)?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
+ <div class="field"><label>MRP ₹</label><input id="p1Mrp" class="input" type="number" min="0" step="0.01" value="${x.mrp??''}"></div>
+ <div class="field"><label>Selling Price ₹ *</label><input id="p1Price" class="input" type="number" min="0" step="0.01" value="${x.selling_price??''}"></div>
+ <div class="field"><label>Stock *</label><input id="p1Stock" class="input" type="number" min="0" step="1" value="${x.stock??0}"></div>
+ <div class="field full"><label>Product Image URL</label><input id="p1Image" class="input" value="${esc(x.image_url)}" placeholder="Public image URL"></div>
+ <div class="field full"><label>Description</label><div style="display:flex;gap:8px;align-items:flex-start"><textarea id="p1Desc" class="input" rows="14" style="flex:1">${esc(x.description)}</textarea><button id="p1Gemini" class="btn" type="button">✨ Generate with Gemini</button></div><small class="muted">Gemini uses the product data and accessible image. Always review generated copy before publishing.</small></div>
+ <div class="field"><label><input id="p1Featured" type="checkbox" ${x.featured?'checked':''}> Featured</label></div>
+ <div class="field"><label><input id="p1Active" type="checkbox" ${x.active?'checked':''}> Active</label></div>
+ <div class="field"><label><input id="p1Approved" type="checkbox" ${x.approved_by_admin?'checked':''}> Approved / Live</label></div>
+ </div><div class="admin-actions"><button id="p1Draft" class="btn secondary" type="button">Save Draft</button><button id="p1Live" class="btn" type="button">Save & Live</button></div></div></div>`;
+}
+async function editor(id){
+ await ensureSession();const p=id?products.find(x=>String(x.id)===String(id)):null;if(id&&!p){alert('Product not found.');return}
+ $('#p1Modal')?.remove();const w=document.createElement('div');w.innerHTML=form(p);document.body.appendChild(w.firstElementChild);const m=$('#p1Modal');
+ $('#p1Close').onclick=()=>m.remove();m.addEventListener('click',e=>{if(e.target===m)m.remove()});$('#p1Draft').onclick=()=>save(p,false);$('#p1Live').onclick=()=>save(p,true);$('#p1Gemini').onclick=()=>gemini(p);
+}
+async function gemini(p){
+ const b=$('#p1Gemini'),m=$('#p1EditorMsg');b.disabled=true;b.textContent='Generating…';m.innerHTML='<div class="notice">Gemini is analyzing the product…</div>';
+ try{const s=await ensureSession();const product={...(p||{}),name:$('#p1Name').value.trim(),sku:$('#p1Sku').value.trim(),category_name:$('#p1Category').selectedOptions[0]?.textContent||'',image_url:$('#p1Image').value.trim(),description:$('#p1Desc').value.trim(),mrp:$('#p1Mrp').value,selling_price:$('#p1Price').value,stock:$('#p1Stock').value};
+ const r=await fetch('/api/generate-product-description',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${s.access_token}`},body:JSON.stringify({product})});const d=await r.json();if(!r.ok)throw Error(d.error||'Gemini generation failed.');$('#p1Desc').value=d.description||'';m.innerHTML='<div class="notice">Description generated. Review it before saving.</div>';
+ }catch(e){m.innerHTML=`<div class="notice error">${esc(e.message||'Generation failed.')}</div>`}finally{b.disabled=false;b.textContent='✨ Generate with Gemini'}
+}
+async function save(p,live){
+ const m=$('#p1EditorMsg'),name=$('#p1Name').value.trim(),category_id=$('#p1Category').value,price=Number($('#p1Price').value),stock=Number($('#p1Stock').value);
+ if(!name)return m.innerHTML='<div class="notice error">Product name is required.</div>';if(!category_id)return m.innerHTML='<div class="notice error">Please select a category.</div>';if(!Number.isFinite(price)||price<0)return m.innerHTML='<div class="notice error">Enter a valid selling price.</div>';if(!Number.isInteger(stock)||stock<0)return m.innerHTML='<div class="notice error">Enter a valid whole-number stock quantity.</div>';
+ const b=live?$('#p1Live'):$('#p1Draft');b.disabled=true;b.textContent='Saving…';
+ const payload={name,sku:$('#p1Sku').value.trim()||null,category_id,mrp:Math.max(0,Number($('#p1Mrp').value)||0),selling_price:price,stock,image_url:$('#p1Image').value.trim()||null,description:$('#p1Desc').value.trim()||null,featured:$('#p1Featured').checked,active:live?true:$('#p1Active').checked,approved_by_admin:live?true:$('#p1Approved').checked};
+ try{const r=p?await db().from('products').update(payload).eq('id',p.id):await db().from('products').insert(payload).select('id').single();if(r.error)throw r.error;m.innerHTML=`<div class="notice success">${live?'Product saved and LIVE.':p?'Product updated successfully.':'Product saved as draft.'}</div>`;setTimeout(()=>{$('#p1Modal')?.remove();refresh(true)},500)}catch(e){m.innerHTML=`<div class="notice error">${esc(e.message||'Save failed.')}</div>`}finally{b.disabled=false;b.textContent=live?'Save & Live':'Save Draft'}
+}
+function legacyProductsBridge(){
+ if(installedLegacyHook)return;
+ if(typeof window.adminTab!=='function')return;
+ const original=window.adminTab;
+ window.adminTab=async function(tab,...args){
+  if(String(tab).toLowerCase()==='products'){
+   const p=$('#adminTab');if(p){p.innerHTML='<div class="notice">Loading Products…</div>';await refresh(true);return}
+  }
+  return original.apply(this,[tab,...args]);
+ };
+ installedLegacyHook=true;
+}
 function start(){
-  /* Capture the Products tab before legacy admin-panel.js can render its old Products UI. */
-  document.addEventListener('click',e=>{const b=e.target.closest('.admin-tabs button[data-tab="products"]');if(!b)return;e.preventDefault();e.stopImmediatePropagation();takeControl()},true);
-  new MutationObserver(()=>{if(isActive()&&!$('#p1AddProduct')&&!busy)refresh(false)}).observe(document.body,{childList:true,subtree:true});
-  setTimeout(()=>{if(isActive()&&!$('#p1AddProduct'))refresh(true)},50);
+ document.addEventListener('click',e=>{
+  const modern=e.target.closest('.admin-tabs button[data-tab="products"]');
+  const legacy=e.target.closest('.tabs button');
+  if(modern){e.preventDefault();e.stopImmediatePropagation();modern.classList.add('active');refresh(true);return}
+  if(legacy&&legacy.textContent.trim().toLowerCase()==='products'){
+   e.preventDefault();e.stopImmediatePropagation();refresh(true);return;
+  }
+ },true);
+ const obs=new MutationObserver(()=>{
+  legacyProductsBridge();
+  if(isProductsSelected()&&container()&&!container().querySelector('#p1AddProduct')&&!busy)refresh(false);
+ });
+ obs.observe(document.body,{childList:true,subtree:true});
+ setInterval(legacyProductsBridge,250);
+ setTimeout(()=>{legacyProductsBridge();if(isProductsSelected()&&!container()?.querySelector('#p1AddProduct'))refresh(true)},100);
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
 window.nexoraPhase1Products={refresh,openAdd:()=>editor(null)};
