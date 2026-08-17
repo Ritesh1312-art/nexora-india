@@ -8,7 +8,7 @@ const fallbackFor=(action)=>{
  return [];
 };
 const safeResponse=data=>new Response(JSON.stringify(data),{status:200,headers:{'content-type':'application/json'}});
-const safeErrorResponse=async(r,action)=>{let d={};try{d=await r.json()}catch{};const detail=d.details?` — ${String(d.details)}`:'';const warning=`${action}: server returned ${r.status}${detail}`;window.__adminDataWarnings.push(warning);return new Response(JSON.stringify({error:`${d.error||'Request failed'}${detail}`}),{status:r.status,headers:{'content-type':'application/json'}})};
+const safeReadFallback=async(r,action)=>{let d={};try{d=await r.json()}catch{};const detail=d.details?` — ${String(d.details)}`:'';window.__adminDataWarnings.push(`${action}: server returned ${r.status}${detail}`);return safeResponse(fallbackFor(action));};
 window.__adminDataWarnings=[];
 window.fetch=async(input,init={})=>{
  const url=typeof input==='string'?input:input?.url||'';
@@ -30,7 +30,7 @@ window.fetch=async(input,init={})=>{
    try{
     const r=await original(input,init);
     if(r.ok)return r;
-    return safeErrorResponse(r,body.action);
+    return safeReadFallback(r,body.action);
    }catch(e){
     window.__adminDataWarnings.push(`${body.action}: ${e?.message||'request failed'}`);
     return safeResponse(fallbackFor(body.action));
