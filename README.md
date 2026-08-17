@@ -26,13 +26,14 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 
 ## Production storefront
 
-`index.html` loads the canonical customer application (`store-v2.js` + `store-v2.css`) plus a small guest-checkout bridge. It provides:
+`index.html` loads the canonical customer application (`store-v2.js` + `store-v2.css`) and the production hardening bridges. It provides:
 
 - Homepage, categories, search, filtering and sorting
 - Product detail, gallery, variants, stock and pricing
 - Persistent guest cart with local storage
 - Authenticated checkout with server-side price/stock validation
 - Optional guest checkout when enabled in Admin → Settings
+- Google customer sign-in via Supabase OAuth, plus email/password authentication
 - UPI intent/QR presentation and manual UTR verification
 - Customer orders, payment history, addresses, wishlist and notifications
 - Password reset and optional TOTP MFA enrollment/challenge
@@ -88,6 +89,10 @@ The production migrations add:
 UPI is intentionally manual-UTR verification because a plain UPI ID cannot independently confirm bank settlement. The storefront can present a configured UPI ID, UPI intent and QR; admin verifies the submitted UTR before fulfilment.
 
 The store's real UPI ID must be entered in **Admin → Settings** before the QR/UPI payment panel can show a live destination. No placeholder UPI ID is hard-coded.
+
+## Google OAuth configuration
+
+The storefront now contains the Google sign-in flow. Before customers can use it, enable the **Google provider** in Supabase Authentication and configure the Google OAuth client credentials plus the production redirect URL in Supabase. This is an external provider configuration and cannot be safely invented in code.
 
 ## Final external security setting
 
