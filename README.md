@@ -29,6 +29,7 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 `index.html` loads the canonical customer application (`store-v2.js` + `store-v2.css`) and the production hardening bridges. It provides:
 
 - Homepage, categories, search, filtering and sorting
+- Five main product categories, including Electrical Appliances
 - Product detail, gallery, variants, stock and pricing
 - Persistent guest cart with local storage
 - Authenticated checkout with server-side price/stock validation
@@ -48,7 +49,8 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 
 - Dashboard statistics
 - Product publishing, pricing, stock and variants
-- Add/edit product with Gemini-assisted descriptions
+- Add Product and Edit Product workflows
+- Gemini-assisted product descriptions
 - Payment verification/rejection
 - Supplier/shipping tracking updates with server-side status validation
 - Users and account blocking
@@ -80,6 +82,7 @@ The production migrations add:
 
 - CJ → Footwear + Kitchen Appliances
 - DeoDap → Daily Use Products + Artificial Jewellery
+- Electrical Appliances remains available as a first-class storefront/admin category; products can be added manually or routed through a configured supplier workflow.
 - Supplier imports remain unpublished until admin review.
 - Supplier integrations do not bypass CAPTCHA, login controls, robots restrictions or supplier terms.
 - Supplier auto-sync is not assumed to be running unless a scheduler is explicitly configured; manual supplier sync remains available from Admin.
@@ -92,7 +95,7 @@ The store's real UPI ID must be entered in **Admin → Settings** before the QR/
 
 ## Google OAuth configuration
 
-The storefront now contains the Google sign-in flow. Before customers can use it, enable the **Google provider** in Supabase Authentication and configure the Google OAuth client credentials plus the production redirect URL in Supabase. This is an external provider configuration and cannot be safely invented in code.
+The storefront contains the Google sign-in flow. Before customers can use it, enable the **Google provider** in Supabase Authentication and configure the Google OAuth client credentials plus the production redirect URL in Supabase. This is an external provider configuration and cannot be safely invented in code.
 
 ## Final external security setting
 
