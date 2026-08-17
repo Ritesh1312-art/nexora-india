@@ -6,15 +6,20 @@
   let authenticated = false;
   let navigating = false;
   const AUTH_ROUTES = new Set(['#/login', '#/register', '#/forgot']);
+
   const $ = (s) => document.querySelector(s);
   const app = () => $('#app');
 
   function syncHeader() {
-    const login = $('#loginLink'), account = $('#accountLink'), cart = $('#cartNav'), logout = $('#logoutBtn'), orders = $('#ordersLink');
+    const login = $('#loginLink');
+    const account = $('#accountLink');
+    const cart = $('#cartNav');
+    const logout = $('#logoutBtn');
     if (login) login.hidden = authenticated;
     if (account) account.hidden = !authenticated;
     if (cart) cart.hidden = !authenticated;
     if (logout) logout.hidden = !authenticated;
+    const orders = $('#ordersLink');
     if (orders) orders.hidden = true;
   }
 
@@ -34,11 +39,11 @@
     else if (typeof window.route === 'function') window.route();
   }
 
-  function renderAccount() {
+  async function renderAccount() {
     if (!authenticated) return renderLogin();
     setRoute('#/account');
-    // Account.js owns the account route. Do not depend on a global renderAccount export.
-    if (typeof window.route === 'function') window.route();
+    if (typeof window.renderAccount === 'function') await window.renderAccount();
+    else if (typeof window.route === 'function') window.route();
   }
 
   function renderLogin() {
@@ -58,28 +63,42 @@
 
   async function logout() {
     navigating = true;
-    try { if (client) await client.auth.signOut({ scope: 'local' }); }
-    catch (e) { console.warn('Nexora logout:', e); }
+    try {
+      if (client && client.auth) await client.auth.signOut({ scope: 'local' });
+    } catch (e) {
+      console.warn('Nexora logout:', e);
+    }
     authenticated = false;
     window.session = null;
-    window.sb = client;
+    if (client) window.sb = client;
     syncHeader();
-    // Logout always has one destination: Store.
     renderStore();
     navigating = false;
   }
 
   async function refreshSession() {
-    if (!client) return;
+    /* IMPORTANT: app.js/auth-rescue may already have a valid session before this
+       router finishes booting. Never let a stale getSession race overwrite it. */
+    if (window.session) authenticated = true;
+    syncHeader();
+
+    if (!client || !client.auth) return;
     try {
       const result = await client.auth.getSession();
-      authenticated = !!result.data.session;
-      window.session = result.data.session || null;
+      const session = result?.data?.session || window.session || null;
+      authenticated = !!session;
+      window.session = session;
       window.sb = client;
       syncHeader();
       if (authenticated && AUTH_ROUTES.has(location.hash)) renderStore();
-      if (!location.hash || location.hash === '#') renderStore();
-    } catch (e) { console.warn('Nexora session:', e); }
+      if (!authenticated && (!location.hash || location.hash === '#')) renderStore();
+    } catch (e) {
+      /* If getSession temporarily races during boot, preserve the already-known
+         authenticated state instead of rendering a Login screen over the Store. */
+      authenticated = !!window.session;
+      syncHeader();
+      if (authenticated && AUTH_ROUTES.has(location.hash)) renderStore();
+    }
   }
 
   function headerTarget(el) {
@@ -87,18 +106,21 @@
     if (el.id === 'logoutBtn') return 'logout';
     if (el.id === 'accountLink' || (el.textContent || '').trim().toLowerCase() === 'account') return 'account';
     const href = (el.getAttribute('href') || '').split('?')[0];
-    const text = (el.textContent || '').trim().toLowerCase();
-    if (href === '#/' || text === 'store') return 'store';
-    if (href === '#/products' || text === 'products') return 'products';
+    if (href === '#/' || (el.textContent || '').trim().toLowerCase() === 'store') return 'store';
+    if (href === '#/products' || (el.textContent || '').trim().toLowerCase() === 'products') return 'products';
     if (el.id === 'cartNav' || href === '#/cart') return 'cart';
     if (el.id === 'loginLink') return 'login';
     return null;
   }
 
   document.addEventListener('click', async (event) => {
-    const el = event.target.closest('a,button'), target = headerTarget(el);
+    const el = event.target.closest('a,button');
+    const target = headerTarget(el);
     if (!target) return;
-    event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.();
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+
     if (target === 'store') return renderStore();
     if (target === 'products') return renderProducts();
     if (target === 'account') return renderAccount();
@@ -111,27 +133,49 @@
     }
   }, true);
 
-  window.addEventListener('hashchange', () => { if (!navigating) renderCurrent(); });
+  window.addEventListener('hashchange', () => {
+    if (navigating) return;
+    renderCurrent();
+  });
 
   async function boot() {
-    for (let i = 0; i < 40 && !window.sb; i++) await new Promise(r => setTimeout(r, 50));
+    /* First trust the session already established by the earlier auth layer. */
+    authenticated = !!window.session;
+    syncHeader();
+
+    /* Wait for the main app's Supabase client, but do not wait forever. */
+    for (let i = 0; i < 100 && !window.sb; i++) {
+      await new Promise(r => setTimeout(r, 50));
+    }
     client = window.sb || null;
-    if (!client?.auth) { console.warn('Nexora customer router: Supabase client unavailable'); return; }
+
     await refreshSession();
     syncHeader();
-    client.auth.onAuthStateChange((_event, session) => {
-      authenticated = !!session;
-      window.session = session || null;
-      window.sb = client;
-      syncHeader();
-      // Every authentication transition has Store as the visible destination.
-      renderStore();
-    });
+
+    if (client && client.auth) {
+      client.auth.onAuthStateChange((_event, session) => {
+        authenticated = !!session;
+        window.session = session || null;
+        window.sb = client;
+        syncHeader();
+        /* Every login/logout transition has exactly one canonical destination. */
+        renderStore();
+      });
+    }
+
+    /* Kill stale Login/Register/Forgot DOM if authentication has already succeeded. */
     const observer = new MutationObserver(() => {
-      if (authenticated && AUTH_ROUTES.has(location.hash)) renderStore();
+      if (window.session) {
+        authenticated = true;
+        syncHeader();
+        if (AUTH_ROUTES.has(location.hash)) renderStore();
+      }
     });
     if (app()) observer.observe(app(), { childList: true, subtree: true });
+
+    /* Canonical initial page: Store for both logged-in and logged-out customers. */
     if (!location.hash || location.hash === '#') renderStore();
+    else if (authenticated && AUTH_ROUTES.has(location.hash)) renderStore();
   }
 
   window.NexoraCustomerRouter = { renderStore, renderProducts, renderAccount, logout, refreshSession };
