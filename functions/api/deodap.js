@@ -44,11 +44,28 @@ function findCategory(categories, aliases) {
   return categories.find(c => wanted.includes(String(c.name || "").trim().toLowerCase()))?.id || null;
 }
 
+function availabilityForProduct(p) {
+  const variants = Array.isArray(p.variants) ? p.variants : [];
+  const quantities = variants
+    .map(v => Number(v.inventory_quantity))
+    .filter(Number.isFinite)
+    .filter(n => n >= 0);
+  if (quantities.length) return { available: quantities.some(n => n > 0), stock: Math.max(0, ...quantities), authoritative: true };
+
+  const availableFlags = variants.map(v => v.available).filter(v => typeof v === "boolean");
+  if (availableFlags.length) {
+    return { available: availableFlags.some(Boolean), stock: 0, authoritative: false };
+  }
+
+  if (typeof p.available === "boolean") return { available: p.available, stock: 0, authoritative: false };
+  return { available: null, stock: null, authoritative: false };
+}
+
 function payloadForProduct(p, categoryIdValue) {
   const v = p.variants?.[0] || {};
   const price = moneyNumber(v.price || p.price || 0);
   const suggested = Number((price * 1.5).toFixed(2));
-  const stock = v.inventory_quantity != null ? Math.max(0, Number(v.inventory_quantity) || 0) : 0;
+  const availability = availabilityForProduct(p);
   return {
     name: p.title || "DeoDap Product",
     slug: p.handle || null,
@@ -61,7 +78,7 @@ function payloadForProduct(p, categoryIdValue) {
     cost_price: price,
     suggested_price: suggested,
     selling_price: suggested,
-    stock,
+    ...(availability.stock != null ? { stock: availability.stock } : {}),
     stock_mode: "AUTO",
     active: false,
     approved_by_admin: false,
