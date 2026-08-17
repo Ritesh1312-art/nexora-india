@@ -1,22 +1,111 @@
 import {json,readBody,supabase,telegram} from "./_utils.js";
 import {validateOffer} from "./offer.js";
-async function releaseReservedStock(env,items){const response=await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});if(!response.ok)throw new Error(`Reserved stock release failed: ${await response.text()}`);return true;}
+
+async function bearerUser(request,env){
+  const auth=request.headers.get("Authorization")||"";
+  if(!auth.startsWith("Bearer "))return null;
+  const token=auth.slice(7);
+  const r=await fetch(`${env.SUPABASE_URL}/auth/v1/user`,{headers:{apikey:env.SUPABASE_ANON_KEY,Authorization:`Bearer ${token}`}});
+  if(!r.ok)return null;
+  return r.json();
+}
+async function releaseReservedStock(env,items){
+  const response=await supabase(env,"rpc/release_product_stock",{method:"POST",body:JSON.stringify({p_items:items})});
+  if(!response.ok)throw new Error(`Reserved stock release failed: ${await response.text()}`);
+}
+
 export async function onRequestPost({request,env}) {
-  const auth=request.headers.get("Authorization")||""; if(!auth.startsWith("Bearer "))return json({error:"Login required"},401);
-  const token=auth.slice(7);const user=await fetch(`${env.SUPABASE_URL}/auth/v1/user`,{headers:{apikey:env.SUPABASE_ANON_KEY,Authorization:`Bearer ${token}`}});if(!user.ok)return json({error:"Invalid session"},401);
-  const u=await user.json(),b=await readBody(request);if(!Array.isArray(b.items)||!b.items.length)return json({error:"Cart is empty"},400);
-  const ids=[...new Set(b.items.map(x=>x.product_id).filter(Boolean))];
-  const r=await supabase(env,`products?id=in.(${ids.map(encodeURIComponent).join(",")})&active=eq.true&approved_by_admin=eq.true&select=id,name,sku,cost_price,selling_price,stock,min_order_qty,electrical_min_order_qty,delivery_charge,electrical_delivery_charge`);const ps=await r.json();if(!Array.isArray(ps))return json({error:"Unable to load products"},500);
-  const sr=await supabase(env,"admin_settings?select=delivery_enabled,default_delivery_charge,electrical_delivery_charge,free_delivery_min_amount&limit=1");const settingsRows=await sr.json().catch(()=>[]);const settings=Array.isArray(settingsRows)&&settingsRows[0]?settingsRows[0]:{delivery_enabled:true,default_delivery_charge:0,electrical_delivery_charge:0,free_delivery_min_amount:0};
-  let subtotal=0,cost=0,totalQty=0,items=[];
-  for(const line of b.items){const p=ps.find(x=>x.id===line.product_id),qty=Math.max(1,Number(line.quantity||1));if(!p)return json({error:"A product is unavailable"},400);if(Number(p.stock)<qty)return json({error:`Insufficient stock for ${p.name}`},400);const minimum=Math.max(1,Number(p.electrical_min_order_qty||p.min_order_qty||1));if(qty<minimum)return json({error:`Minimum order quantity for ${p.name} is ${minimum}`},400);subtotal+=Number(p.selling_price)*qty;cost+=Number(p.cost_price)*qty;totalQty+=qty;items.push({product_id:p.id,product_name:p.name,sku:p.sku,quantity:qty,unit_selling_price:p.selling_price,unit_cost_price:p.cost_price,total_selling_price:Number(p.selling_price)*qty,total_cost_price:Number(p.cost_price)*qty});}
-  const c=b.customer||{};if(!c.name||!c.phone||!c.address_line1||!c.city||!c.state||!c.pincode)return json({error:"Complete customer address is required"},400);
-  let discount=0,offerId=null,offerCode=null;if(b.offer_code){const offer=await validateOffer({code:b.offer_code,subtotal,quantity:totalQty,userId:u.id,env});if(!offer.valid)return json({error:offer.error},400);discount=offer.discount_amount;offerId=offer.offer_id;offerCode=offer.code;}
-  let shipping=0;if(settings.delivery_enabled!==false&&subtotal<Number(settings.free_delivery_min_amount||0)){shipping=items.reduce((sum,line)=>{const p=ps.find(x=>x.id===line.product_id);const isElectrical=Number(p?.electrical_delivery_charge||0)>0;const productCharge=isElectrical?Number(p.electrical_delivery_charge):Number(p?.delivery_charge||0);const fallback=isElectrical?Number(settings.electrical_delivery_charge||0):Number(settings.default_delivery_charge||0);return sum+(productCharge>0?productCharge:fallback)*Number(line.quantity||0);},0);}
-  const total=Math.max(0,Number((subtotal-discount+shipping).toFixed(2)));
-  const reservation=await supabase(env,"rpc/reserve_product_stock",{method:"POST",body:JSON.stringify({p_items:items.map(x=>({product_id:x.product_id,quantity:x.quantity}))})});const reservationData=await reservation.json().catch(()=>null);if(!reservation.ok){const msg=String(reservationData?.message||reservationData?.hint||"");const insufficient=msg.includes("INSUFFICIENT_STOCK")||reservationData?.code==="P0001";return json({error:insufficient?"One or more products went out of stock during checkout":"Unable to reserve product stock",details:msg||reservationData},409);}
-  const orderBody={user_id:u.id,customer_name:c.name,customer_email:u.email||null,customer_phone:c.phone,address_line1:c.address_line1,address_line2:c.address_line2||null,city:c.city,state:c.state,pincode:c.pincode,landmark:c.landmark||null,subtotal,discount_amount:discount,shipping_amount:shipping,total_amount:total,estimated_supplier_cost:cost,estimated_profit:Number((total-cost).toFixed(2)),offer_id:offerId,offer_code:offerCode,payment_method:"UPI",payment_status:b.utr?"SUBMITTED":"PENDING",utr:b.utr||null,order_status:b.utr?"PAYMENT_SUBMITTED":"PENDING_PAYMENT",stock_reserved:true,stock_released:false};
-  const or=await supabase(env,"orders",{method:"POST",body:JSON.stringify(orderBody)});const od=await or.json();if(!or.ok){try{await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})))}catch(e){return json({error:"Order creation failed and reserved stock could not be released",details:String(e?.message||e)},500)}return json({error:od?.message||"Order creation failed"},500);}
-  const order=od[0];const ir=await supabase(env,"order_items",{method:"POST",body:JSON.stringify(items.map(x=>({...x,order_id:order.id})))});if(!ir.ok){try{await releaseReservedStock(env,items.map(x=>({product_id:x.product_id,quantity:x.quantity})))}catch(e){return json({error:"Order item save failed and reserved stock could not be released",details:String(e?.message||e)},500)}await supabase(env,`orders?id=eq.${encodeURIComponent(order.id)}`,{method:"DELETE"});return json({error:"Order created but item save failed"},500);}
-  await telegram(env,`🛍️ NEXORA-INDIA NEW ORDER\nOrder: ${order.order_number}\nCustomer: ${c.name}\nPhone: ${c.phone}\nAmount: ₹${total}\nDiscount: ₹${discount}\nDelivery: ₹${shipping}\nPayment: ${order.payment_status}\nUTR: ${b.utr||"not submitted"}`);return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount,shipping_amount:shipping,stock_reserved:true});
+  try{
+    const u=await bearerUser(request,env);
+    if(!u)return json({error:"Login required"},401);
+    const b=await readBody(request);
+    if(!Array.isArray(b.items)||!b.items.length)return json({error:"Cart is empty"},400);
+
+    // Normalize duplicate cart lines by product + variant.
+    const merged=new Map();
+    for(const raw of b.items){
+      const productId=String(raw?.product_id||"").trim(),variantId=String(raw?.variant_id||"").trim()||null;
+      const qty=Math.floor(Number(raw?.quantity||0));
+      if(!productId||qty<1)return json({error:"Invalid cart item"},400);
+      const key=`${productId}:${variantId||"base"}`;
+      merged.set(key,{product_id:productId,variant_id:variantId,quantity:(merged.get(key)?.quantity||0)+qty});
+    }
+    const lines=[...merged.values()];
+    const ids=[...new Set(lines.map(x=>x.product_id))];
+    const productPath=`products?id=in.(${ids.map(encodeURIComponent).join(",")})&active=eq.true&approved_by_admin=eq.true&select=id,name,sku,cost_price,selling_price,stock,min_order_qty,electrical_mrp,electrical_delivery_charge,delivery_charge`;
+    const pr=await supabase(env,productPath);const ps=await pr.json();
+    if(!pr.ok||!Array.isArray(ps))return json({error:"Unable to load products"},502);
+
+    const variantsPath=`product_variants?product_id=in.(${ids.map(encodeURIComponent).join(",")})&active=eq.true&select=id,product_id,variant_name,sku,cost_price,selling_price,stock`;
+    const vr=await supabase(env,variantsPath);const variants=await vr.json();
+    if(!vr.ok||!Array.isArray(variants))return json({error:"Unable to load product variants"},502);
+
+    const sr=await supabase(env,"admin_settings?select=delivery_enabled,default_delivery_charge,electrical_delivery_charge,free_delivery_min_amount&limit=1");
+    const settingsRows=await sr.json().catch(()=>[]);
+    const settings=Array.isArray(settingsRows)&&settingsRows[0]?settingsRows[0]:{delivery_enabled:true,default_delivery_charge:0,electrical_delivery_charge:0,free_delivery_min_amount:0};
+
+    let subtotal=0,cost=0,totalQty=0,items=[];
+    for(const line of lines){
+      const p=ps.find(x=>x.id===line.product_id);
+      if(!p)return json({error:"A product is unavailable"},400);
+      const v=line.variant_id?variants.find(x=>x.id===line.variant_id&&x.product_id===p.id):null;
+      if(line.variant_id&&!v)return json({error:`Selected option for ${p.name} is unavailable`},400);
+      const qty=line.quantity;
+      const minimum=Math.max(1,Number(p.min_order_qty||1));
+      if(qty<minimum)return json({error:`Minimum order quantity for ${p.name} is ${minimum}`},400);
+      const unitPrice=Number(v?.selling_price??p.selling_price||0);
+      const unitCost=Number(v?.cost_price??p.cost_price||0);
+      const available=Number(v?.stock??p.stock||0);
+      if(available<qty)return json({error:`Insufficient stock for ${p.name}${v?` (${v.variant_name})`:""}`},409);
+      subtotal+=unitPrice*qty;cost+=unitCost*qty;totalQty+=qty;
+      items.push({product_id:p.id,variant_id:v?.id||null,product_name:v?`${p.name} — ${v.variant_name}`:p.name,sku:v?.sku||p.sku||null,quantity:qty,unit_selling_price:unitPrice,unit_cost_price:unitCost,total_selling_price:unitPrice*qty,total_cost_price:unitCost*qty});
+    }
+
+    const c=b.customer||{};
+    const name=String(c.name||"").trim(),phone=String(c.phone||"").trim(),address=String(c.address_line1||"").trim(),city=String(c.city||"").trim(),state=String(c.state||"").trim(),pincode=String(c.pincode||"").trim(),landmark=String(c.landmark||"").trim();
+    if(!name||!phone||!address||!city||!state||!/^[0-9]{6}$/.test(pincode))return json({error:"Complete customer address is required and pincode must be 6 digits"},400);
+
+    const utr=String(b.utr||"").trim();
+    if(utr&&(!/^[A-Za-z0-9]{6,64}$/.test(utr)))return json({error:"Invalid UTR/reference. Use 6–64 letters or numbers."},400);
+    let discount=0,offerId=null,offerCode=null;
+    if(b.offer_code){const offer=await validateOffer({code:String(b.offer_code).trim(),subtotal,quantity:totalQty,userId:u.id,env});if(!offer.valid)return json({error:offer.error},400);discount=Number(offer.discount_amount||0);offerId=offer.offer_id;offerCode=offer.code;}
+
+    let shipping=0;
+    if(settings.delivery_enabled!==false&&subtotal<Number(settings.free_delivery_min_amount||0)){
+      shipping=items.reduce((sum,line)=>{
+        const p=ps.find(x=>x.id===line.product_id);
+        const electrical=p?.electrical_mrp!=null;
+        const productCharge=electrical?Number(p?.electrical_delivery_charge||0):Number(p?.delivery_charge||0);
+        const fallback=electrical?Number(settings.electrical_delivery_charge||0):Number(settings.default_delivery_charge||0);
+        return sum+(productCharge>0?productCharge:fallback)*Number(line.quantity||0);
+      },0);
+    }
+    const total=Math.max(0,Number((subtotal-discount+shipping).toFixed(2)));
+
+    const stockItems=items.map(x=>({product_id:x.product_id,variant_id:x.variant_id,quantity:x.quantity}));
+    const reservation=await supabase(env,"rpc/reserve_product_stock",{method:"POST",body:JSON.stringify({p_items:stockItems})});
+    const reservationData=await reservation.json().catch(()=>null);
+    if(!reservation.ok){
+      const msg=String(reservationData?.message||reservationData?.hint||"");
+      const insufficient=msg.includes("INSUFFICIENT_STOCK")||msg.includes("INSUFFICIENT_VARIANT_STOCK")||reservationData?.code==="P0001";
+      return json({error:insufficient?"One or more products went out of stock during checkout":"Unable to reserve product stock",details:msg||reservationData},409);
+    }
+
+    const now=new Date().toISOString();
+    const orderBody={user_id:u.id,customer_name:name,customer_email:u.email||null,customer_phone:phone,address_line1:address,address_line2:String(c.address_line2||"").trim()||null,city,state,pincode,landmark:landmark||null,subtotal,discount_amount:discount,shipping_amount:shipping,total_amount:total,estimated_supplier_cost:cost,estimated_profit:Number((total-cost).toFixed(2)),offer_id:offerId,offer_code:offerCode,payment_method:"UPI",payment_status:utr?"SUBMITTED":"PENDING",utr:utr||null,order_status:utr?"PAYMENT_SUBMITTED":"PENDING_PAYMENT",stock_reserved:true,stock_released:false,updated_at:now};
+    const or=await supabase(env,"orders",{method:"POST",body:JSON.stringify(orderBody)});const od=await or.json();
+    if(!or.ok){try{await releaseReservedStock(env,stockItems)}catch(e){return json({error:"Order creation failed and reserved stock could not be released",details:String(e?.message||e)},500)}return json({error:od?.message||"Order creation failed"},500);}
+    const order=od[0];
+
+    const ir=await supabase(env,"order_items",{method:"POST",body:JSON.stringify(items.map(x=>({...x,order_id:order.id})))});const idata=await ir.json().catch(()=>null);
+    if(!ir.ok){
+      try{await releaseReservedStock(env,stockItems)}catch(e){return json({error:"Order item save failed and reserved stock could not be released",details:String(e?.message||e)},500)}
+      await supabase(env,`payment_records?order_id=eq.${encodeURIComponent(order.id)}`,{method:"DELETE"});
+      await supabase(env,`orders?id=eq.${encodeURIComponent(order.id)}`,{method:"DELETE"});
+      return json({error:"Order created but item save failed",details:idata},500);
+    }
+
+    await telegram(env,`🛍️ NEXORA-INDIA NEW ORDER\nOrder: ${order.order_number}\nCustomer: ${name}\nPhone: ${phone}\nAmount: ₹${total}\nDiscount: ₹${discount}\nDelivery: ₹${shipping}\nPayment: ${order.payment_status}\nUTR: ${utr||"not submitted"}`);
+    return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount,shipping_amount:shipping,stock_reserved:true,payment_status:order.payment_status});
+  }catch(e){return json({error:"Order creation error",details:String(e?.message||e)},500)}
 }
