@@ -6,28 +6,20 @@
   let authenticated = false;
   let navigating = false;
   const AUTH_ROUTES = new Set(['#/login', '#/register', '#/forgot']);
-
   const $ = (s) => document.querySelector(s);
   const app = () => $('#app');
 
   function syncHeader() {
-    const login = $('#loginLink');
-    const account = $('#accountLink');
-    const cart = $('#cartNav');
-    const logout = $('#logoutBtn');
+    const login = $('#loginLink'), account = $('#accountLink'), cart = $('#cartNav'), logout = $('#logoutBtn'), orders = $('#ordersLink');
     if (login) login.hidden = authenticated;
     if (account) account.hidden = !authenticated;
     if (cart) cart.hidden = !authenticated;
     if (logout) logout.hidden = !authenticated;
-    // My Orders is intentionally not a top-level navigation item.
-    const orders = $('#ordersLink');
     if (orders) orders.hidden = true;
   }
 
   function setRoute(hash) {
-    if (location.hash !== hash) {
-      history.replaceState(null, '', hash);
-    }
+    if (location.hash !== hash) history.replaceState(null, '', hash);
   }
 
   function renderStore() {
@@ -42,11 +34,11 @@
     else if (typeof window.route === 'function') window.route();
   }
 
-  async function renderAccount() {
+  function renderAccount() {
     if (!authenticated) return renderLogin();
     setRoute('#/account');
-    if (typeof window.renderAccount === 'function') await window.renderAccount();
-    else if (typeof window.route === 'function') window.route();
+    // Account.js owns the account route. Do not depend on a global renderAccount export.
+    if (typeof window.route === 'function') window.route();
   }
 
   function renderLogin() {
@@ -66,16 +58,13 @@
 
   async function logout() {
     navigating = true;
-    try {
-      if (client) await client.auth.signOut({ scope: 'local' });
-    } catch (e) {
-      console.warn('Nexora logout:', e);
-    }
+    try { if (client) await client.auth.signOut({ scope: 'local' }); }
+    catch (e) { console.warn('Nexora logout:', e); }
     authenticated = false;
     window.session = null;
     window.sb = client;
     syncHeader();
-    // Never retain the page that was open before logout.
+    // Logout always has one destination: Store.
     renderStore();
     navigating = false;
   }
@@ -84,17 +73,13 @@
     if (!client) return;
     try {
       const result = await client.auth.getSession();
-      const next = !!result.data.session;
-      authenticated = next;
+      authenticated = !!result.data.session;
       window.session = result.data.session || null;
       window.sb = client;
       syncHeader();
-      // Auth transitions always land on Store. This also removes any stale Login UI.
-      if (next && AUTH_ROUTES.has(location.hash)) renderStore();
-      if (!next && !location.hash) renderStore();
-    } catch (e) {
-      console.warn('Nexora session:', e);
-    }
+      if (authenticated && AUTH_ROUTES.has(location.hash)) renderStore();
+      if (!location.hash || location.hash === '#') renderStore();
+    } catch (e) { console.warn('Nexora session:', e); }
   }
 
   function headerTarget(el) {
@@ -102,22 +87,18 @@
     if (el.id === 'logoutBtn') return 'logout';
     if (el.id === 'accountLink' || (el.textContent || '').trim().toLowerCase() === 'account') return 'account';
     const href = (el.getAttribute('href') || '').split('?')[0];
-    if (href === '#/' || (el.textContent || '').trim().toLowerCase() === 'store') return 'store';
-    if (href === '#/products' || (el.textContent || '').trim().toLowerCase() === 'products') return 'products';
+    const text = (el.textContent || '').trim().toLowerCase();
+    if (href === '#/' || text === 'store') return 'store';
+    if (href === '#/products' || text === 'products') return 'products';
     if (el.id === 'cartNav' || href === '#/cart') return 'cart';
     if (el.id === 'loginLink') return 'login';
     return null;
   }
 
   document.addEventListener('click', async (event) => {
-    const el = event.target.closest('a,button');
-    const target = headerTarget(el);
+    const el = event.target.closest('a,button'), target = headerTarget(el);
     if (!target) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-
+    event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.();
     if (target === 'store') return renderStore();
     if (target === 'products') return renderProducts();
     if (target === 'account') return renderAccount();
@@ -130,39 +111,26 @@
     }
   }, true);
 
-  window.addEventListener('hashchange', () => {
-    if (navigating) return;
-    renderCurrent();
-  });
+  window.addEventListener('hashchange', () => { if (!navigating) renderCurrent(); });
 
   async function boot() {
-    // Wait for the Supabase client exposed by the main app/auth scripts.
     for (let i = 0; i < 40 && !window.sb; i++) await new Promise(r => setTimeout(r, 50));
     client = window.sb || null;
-    if (!client || !client.auth) {
-      console.warn('Nexora customer router: Supabase client unavailable');
-      return;
-    }
+    if (!client?.auth) { console.warn('Nexora customer router: Supabase client unavailable'); return; }
     await refreshSession();
     syncHeader();
-
     client.auth.onAuthStateChange((_event, session) => {
       authenticated = !!session;
       window.session = session || null;
       window.sb = client;
       syncHeader();
-      if (authenticated) renderStore();
-      else renderStore();
+      // Every authentication transition has Store as the visible destination.
+      renderStore();
     });
-
-    // If an older auth script renders Login after login succeeds, remove that stale
-    // auth screen on the next DOM mutation and return to Store.
     const observer = new MutationObserver(() => {
       if (authenticated && AUTH_ROUTES.has(location.hash)) renderStore();
     });
     if (app()) observer.observe(app(), { childList: true, subtree: true });
-
-    // Canonical initial page: Store for both logged-in and logged-out customers.
     if (!location.hash || location.hash === '#') renderStore();
   }
 
