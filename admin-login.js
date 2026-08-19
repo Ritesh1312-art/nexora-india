@@ -8,6 +8,11 @@
   }
 
   function init(){
+    // The admin panel now has one authoritative authentication mechanism: the
+    // HttpOnly nexora_admin cookie. Remove tokens left by older hotfix builds so
+    // admin-v3 cannot accidentally send a stale Bearer token ahead of the cookie.
+    try{sessionStorage.removeItem('nexora_admin_token')}catch{}
+
     const form=document.getElementById('loginForm');
     const password=document.getElementById('password');
     const button=document.getElementById('loginBtn');
@@ -61,13 +66,12 @@
       msg.innerHTML='';
 
       try{
-        // Use the single authoritative admin endpoint. Authentication is cookie-based;
-        // no sessionStorage token or second login endpoint is required.
+        // Single authoritative login endpoint. The server issues the HttpOnly
+        // session cookie; no client token is stored or required.
         await request({action:'login',password:pw});
 
-        // Do not redirect blindly. Verify that the browser can immediately use
-        // the freshly issued HttpOnly session cookie. This prevents the old
-        // "green success -> login again" loop from being hidden.
+        // Verify the freshly issued cookie before changing the page. This makes
+        // a cookie/session failure visible instead of creating a silent login loop.
         await request({action:'session'});
 
         show('Login successful. Opening admin panel…',true);
