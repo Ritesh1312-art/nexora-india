@@ -21,6 +21,22 @@ export async function supabase(env,path,opts={}){
 }
 export function b64u(bytes){let s="";if(typeof bytes==="string")s=bytes;else s=String.fromCharCode(...new Uint8Array(bytes));return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
 export function unb64u(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return atob(s)}
-export async function signAdmin(env){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.JWT_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);const payload=b64u(new TextEncoder().encode(JSON.stringify({sub:"admin",iat:Date.now(),exp:Date.now()+8*60*60*1000})));const sig=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(payload));return `${payload}.${b64u(sig)}`}
-export async function validAdmin(req,env){const c=req.headers.get("Cookie")||"";const m=c.match(/nexora_admin=([^;]+)/);if(!m)return false;try{const [p,s]=m[1].split(".");const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.JWT_SECRET),{name:"HMAC",hash:"SHA-256"},false,["verify"]);const ok=await crypto.subtle.verify("HMAC",key,Uint8Array.from(unb64u(s),c=>c.charCodeAt(0)),new TextEncoder().encode(p));if(!ok)return false;const data=JSON.parse(new TextDecoder().decode(Uint8Array.from(unb64u(p),c=>c.charCodeAt(0))));return data.sub==="admin"&&data.exp>Date.now()}catch{return false}}
+export async function signAdmin(env){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.JWT_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);const now=Date.now();const payload=b64u(new TextEncoder().encode(JSON.stringify({sub:"admin",iat:now,exp:now+8*60*60*1000})));const sig=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(payload));return `${payload}.${b64u(sig)}`}
+export async function validAdmin(req,env){
+ const cookie=req.headers.get("Cookie")||"";
+ const cookieMatch=cookie.match(/(?:^|;\s*)nexora_admin=([^;]+)/);
+ const auth=req.headers.get("Authorization")||"";
+ const bearer=auth.startsWith("Bearer ")?auth.slice(7).trim():"";
+ const token=bearer||cookieMatch?.[1]||"";
+ if(!token)return false;
+ try{
+  const [p,s]=token.split(".");
+  if(!p||!s)return false;
+  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.JWT_SECRET),{name:"HMAC",hash:"SHA-256"},false,["verify"]);
+  const ok=await crypto.subtle.verify("HMAC",key,Uint8Array.from(unb64u(s),c=>c.charCodeAt(0)),new TextEncoder().encode(p));
+  if(!ok)return false;
+  const data=JSON.parse(new TextDecoder().decode(Uint8Array.from(unb64u(p),c=>c.charCodeAt(0))));
+  return data.sub==="admin"&&Number(data.exp)>Date.now();
+ }catch{return false}
+}
 export async function telegram(env,text){if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)return;try{await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})})}catch{}}
