@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#111936">
 <title>Nexora-India Admin</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23111936'/%3E%3Ctext x='32' y='45' text-anchor='middle' font-family='Arial' font-size='34' font-weight='900' fill='white'%3EN%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/admin-v2.css?v=20260819-9">
+<link rel="stylesheet" href="/admin-v2.css?v=20260819-10">
 </head>
 <body>
 <main class="admin-shell">
@@ -26,68 +26,97 @@
 <script>
 (function(){
   'use strict';
-  // admin-v2.js uses Promise.all for independent dashboard requests. One failed
-  // secondary request must not abort the entire dashboard and leave it blank.
-  const originalAll=Promise.all.bind(Promise);
-  Promise.all=function(iterable){
-    const items=Array.from(iterable);
-    const isAdminBatch=items.length===10;
-    if(!isAdminBatch)return originalAll(items);
-    const defaults=[{},[],[],[],[],[],[],[],[],{}];
-    return originalAll(items.map((p,i)=>Promise.resolve(p).catch(err=>{
-      window.__adminLoadWarnings=window.__adminLoadWarnings||[];
-      window.__adminLoadWarnings.push(String(err&&err.message||err));
-      return defaults[i];
-    })));
+
+  // admin-v2.js loads ten independent dashboard requests together. Keep one
+  // failed secondary request from aborting the entire dashboard boot.
+  const nativeAll = Promise.all.bind(Promise);
+  Promise.all = function(iterable){
+    const items = Array.from(iterable);
+    if(items.length !== 10) return nativeAll(items);
+    const defaults = [
+      {products:0,users:0,orders:0,sales:0},
+      [], [], [], [], [], [], [], [], {}
+    ];
+    return nativeAll(items.map((item,index)=>Promise.resolve(item).then(value=>{
+      if(value && typeof value === 'object' && value.error) return defaults[index];
+      if(index === 0 && (!value || typeof value !== 'object')) return defaults[index];
+      if(index !== 0 && index !== 9 && !Array.isArray(value)) return defaults[index];
+      if(index === 9 && (!value || typeof value !== 'object')) return defaults[index];
+      return value;
+    }).catch(()=>defaults[index])));
   };
-  window.addEventListener('error',function(e){
-    if(!e||!e.message)return;
-    const dash=document.getElementById('dash');
-    if(dash&&dash.hidden===false&&!dash.innerHTML.trim()){
-      dash.innerHTML='<div class="panel"><h2>Admin dashboard error</h2><p class="muted">A dashboard component failed to load. Please refresh and try again.</p><button class="btn" onclick="location.reload()">Retry</button></div>';
+
+  const form = document.getElementById('loginForm');
+  const password = document.getElementById('password');
+  const button = document.getElementById('loginBtn');
+  const msg = document.getElementById('msg');
+  if(!form || !password || !button) return;
+
+  let busy = false;
+  const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+
+  // admin-v2.js also has a button handler. Stop that handler here so there is
+  // exactly one owner of the login flow and no duplicate login/session calls.
+  document.addEventListener('click',function(e){
+    if(e.target && e.target.closest && e.target.closest('#loginBtn')){
+      e.preventDefault();
+      e.stopImmediatePropagation();
     }
-  });
-})();
-</script>
-<script src="/admin-v2.js?v=20260819-9"></script>
-<script>
-(function(){
-  'use strict';
-  const form=document.getElementById('loginForm');
-  const password=document.getElementById('password');
-  const button=document.getElementById('loginBtn');
-  const msg=document.getElementById('msg');
-  if(!form||!password||!button)return;
-  let busy=false;
+  },true);
+
   document.addEventListener('submit',async function(e){
-    if(e.target!==form)return;
+    if(e.target !== form) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    if(busy)return;
-    const value=password.value;
-    if(!value){if(msg)msg.innerHTML='<div class="notice error">Enter admin password</div>';password.focus();return;}
-    busy=true;
-    button.disabled=true;
-    button.textContent='Logging in…';
-    if(msg)msg.innerHTML='';
+    if(busy) return;
+
+    const value = password.value;
+    if(!value){
+      msg.innerHTML='<div class="notice error">Enter admin password</div>';
+      password.focus();
+      return;
+    }
+
+    busy = true;
+    button.disabled = true;
+    button.textContent = 'Logging in…';
+    msg.innerHTML = '';
+
     try{
-      const r=await fetch('/api/admin',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'content-type':'application/json'},body:JSON.stringify({action:'login',password:value})});
-      const d=await r.json().catch(()=>({error:'Invalid server response'}));
-      if(!r.ok||!d.ok)throw new Error(d.error||'Login failed');
-      const s=await fetch('/api/admin',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'content-type':'application/json'},body:JSON.stringify({action:'session'})});
-      const sd=await s.json().catch(()=>({error:'Invalid session response'}));
-      if(!s.ok||!sd.ok)throw new Error(sd.error||'Admin session could not be established');
-      button.textContent='Login successful…';
-      window.location.reload();
+      const r = await fetch('/api/admin',{
+        method:'POST',
+        credentials:'same-origin',
+        cache:'no-store',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({action:'login',password:value})
+      });
+      const d = await r.json().catch(()=>({error:'Invalid server response'}));
+      if(!r.ok || !d.ok) throw new Error(d.error || 'Login failed');
+
+      const s = await fetch('/api/admin',{
+        method:'POST',
+        credentials:'same-origin',
+        cache:'no-store',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({action:'session'})
+      });
+      const sd = await s.json().catch(()=>({error:'Invalid session response'}));
+      if(!s.ok || !sd.ok) throw new Error(sd.error || 'Admin session could not be established');
+
+      // Let the canonical admin-v2 boot run from a clean page load.
+      location.reload();
     }catch(err){
-      if(msg)msg.innerHTML='<div class="notice error">'+String(err.message||err).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</div>';
-      busy=false;
-      button.disabled=false;
-      button.textContent='Login';
+      msg.innerHTML='<div class="notice error">'+esc(err.message || err)+'</div>';
+      busy = false;
+      button.disabled = false;
+      button.textContent = 'Login';
       password.focus();
     }
   },true);
 })();
 </script>
+<script src="/admin-v2.js?v=20260819-10"></script>
 </body>
 </html>
