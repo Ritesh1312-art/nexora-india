@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#111936">
 <title>Nexora-India Admin</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23111936'/%3E%3Ctext x='32' y='45' text-anchor='middle' font-family='Arial' font-size='34' font-weight='900' fill='white'%3EN%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/admin-v2.css?v=20260819-10">
+<link rel="stylesheet" href="/admin-v2.css?v=20260819-11">
 </head>
 <body>
 <main class="admin-shell">
@@ -27,8 +27,7 @@
 (function(){
   'use strict';
 
-  // admin-v2.js loads ten independent dashboard requests together. Keep one
-  // failed secondary request from aborting the entire dashboard boot.
+  // Keep one failed secondary dashboard request from aborting the whole boot.
   const nativeAll = Promise.all.bind(Promise);
   Promise.all = function(iterable){
     const items = Array.from(iterable);
@@ -57,11 +56,11 @@
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[c]));
 
-  // admin-v2.js also has a button handler. Stop that handler here so there is
-  // exactly one owner of the login flow and no duplicate login/session calls.
+  // admin-v2.js has its own click handler. Stop that handler, but do NOT
+  // prevent the browser's default submit action; the submit listener below
+  // is the single owner of the actual login request.
   document.addEventListener('click',function(e){
     if(e.target && e.target.closest && e.target.closest('#loginBtn')){
-      e.preventDefault();
       e.stopImmediatePropagation();
     }
   },true);
@@ -86,9 +85,7 @@
 
     try{
       const r = await fetch('/api/admin',{
-        method:'POST',
-        credentials:'same-origin',
-        cache:'no-store',
+        method:'POST',credentials:'same-origin',cache:'no-store',
         headers:{'content-type':'application/json'},
         body:JSON.stringify({action:'login',password:value})
       });
@@ -96,16 +93,13 @@
       if(!r.ok || !d.ok) throw new Error(d.error || 'Login failed');
 
       const s = await fetch('/api/admin',{
-        method:'POST',
-        credentials:'same-origin',
-        cache:'no-store',
+        method:'POST',credentials:'same-origin',cache:'no-store',
         headers:{'content-type':'application/json'},
         body:JSON.stringify({action:'session'})
       });
       const sd = await s.json().catch(()=>({error:'Invalid session response'}));
       if(!s.ok || !sd.ok) throw new Error(sd.error || 'Admin session could not be established');
 
-      // Let the canonical admin-v2 boot run from a clean page load.
       location.reload();
     }catch(err){
       msg.innerHTML='<div class="notice error">'+esc(err.message || err)+'</div>';
@@ -117,6 +111,6 @@
   },true);
 })();
 </script>
-<script src="/admin-v2.js?v=20260819-10"></script>
+<script src="/admin-v2.js?v=20260819-11"></script>
 </body>
 </html>
