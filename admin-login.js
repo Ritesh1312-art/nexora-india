@@ -29,7 +29,6 @@
         if(!r.ok||!data.ok)throw new Error(data.error||('Login failed (HTTP '+r.status+')'));
         if(data.token){
           try{sessionStorage.setItem('nexora_admin_token',data.token)}catch{}
-          document.cookie='nexora_admin='+data.token+'; Path=/; Secure; SameSite=Lax';
         }
         show('Login successful. Opening admin panel…',true);
         window.location.replace('/admin.html?session=1');
