@@ -1,4 +1,4 @@
-import {json,readBody,supabase,validAdmin} from './_utils.js';
+import {json,readBody,supabase,validAdmin,isSafePublicUrl} from './_utils.js';
 
 const clean=v=>String(v??'').trim();
 const slugify=v=>clean(v).toLowerCase().normalize('NFKD').replace(/[^\w\s-]/g,'').replace(/[_\s]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').slice(0,120);
@@ -27,8 +27,8 @@ async function saveProduct(env,b){
 async function fetchImageForGemini(imageUrl){
  if(!imageUrl)return null;
  try{
-  const u=new URL(imageUrl);if(!['http:','https:'].includes(u.protocol))return null;
-  const r=await fetch(u.toString(),{redirect:'follow',headers:{accept:'image/*'}});
+  if(!isSafePublicUrl(imageUrl))return null;
+  const r=await fetch(imageUrl,{redirect:'follow',headers:{accept:'image/*'}});
   if(!r.ok)return null;
   const type=(r.headers.get('content-type')||'').split(';')[0].toLowerCase();
   if(!type.startsWith('image/'))return null;

@@ -20,7 +20,10 @@ export async function supabase(env,path,opts={}){
  }catch{return first}
 }
 export async function rateLimit(request,env,route,limit,windowSeconds){
- const ip=(request.headers.get("CF-Connecting-IP")||request.headers.get("X-Forwarded-For")||"unknown").split(",")[0].trim().slice(0,128)||"unknown";
+ // Trust only CF-Connecting-IP (set by Cloudflare and not spoofable by the
+ // client). X-Forwarded-For is client-controlled and would let an attacker
+ // rotate IPs to bypass login/API rate limits.
+ const ip=(request.headers.get("CF-Connecting-IP")||"").split(",")[0].trim().slice(0,128)||"unknown";
  const raw=`nexora-rate:${route}:${ip}`;
  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(raw));
  const key=b64u(digest);
@@ -65,6 +68,42 @@ export async function validAdmin(req,env){
   const data=JSON.parse(new TextDecoder().decode(Uint8Array.from(unb64u(p),c=>c.charCodeAt(0))));
   return data.sub==="admin"&&Number(data.exp)>Date.now();
  }catch{return false}
+}
+// SSRF guard for admin-supplied image URLs (Gemini description generation).
+// Blocks non-http(s) protocols, localhost/internal hostnames and private,
+// loopback, link-local and unspecified IP literals so a URL cannot be used to
+// probe Cloudflare metadata endpoints or internal services.
+export function isSafePublicUrl(value){
+ let u;try{u=new URL(String(value||""))}catch{return false}
+ if(!["http:","https:"].includes(u.protocol))return false;
+ const host=u.hostname.toLowerCase();
+ if(host==="localhost"||host.endsWith(".localhost")||host.endsWith(".local")||host.endsWith(".internal")||host.endsWith(".lan"))return false;
+ if(host==="0.0.0.0"||host==="[::]")return false;
+ const ipv4=host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+ if(ipv4){
+  const a=+ipv4[1],b=+ipv4[2],c=+ipv4[3],d=+ipv4[4];
+  if(a>255||b>255||c>255||d>255)return false;
+  if(a===127)return false;                                   // loopback
+  if(a===10)return false;                                    // private
+  if(a===172&&b>=16&&b<=31)return false;                     // private
+  if(a===192&&b===168)return false;                          // private
+  if(a===169&&b===254)return false;                          // link-local (metadata)
+  if(a===100&&b>=64&&b<=127)return false;                    // CGNAT
+  if(a===192&&b===0&&c===0)return false;                     // IETF special
+  if(a===198&&(b===18||b===19))return false;                 // benchmarking
+  if(a>=224)return false;                                    // multicast/reserved
+  return true;
+ }
+ const ipv6=host.startsWith("[")&&host.endsWith("]")?host.slice(1,-1):host;
+ if(ipv6.includes(":")){
+  const h=ipv6.toLowerCase();
+  if(h==="::1")return false;                                 // loopback
+  if(h==="::")return false;                                  // unspecified
+  if(/^f[cd]/.test(h))return false;                          // fc00::/7 unique-local
+  if(/^fe[89ab]/.test(h))return false;                       // fe80::/10 link-local
+  return true;
+ }
+ return true;
 }
 function sanitizeTelegram(text){return String(text??"")
  .replace(/(^|\n)(Customer|Name|Phone|Email|Address|Address Line 1|Address Line 2|City|State|Pincode|Landmark)\s*:\s*[^\n]*/gi,"$1$2: [REDACTED]")
