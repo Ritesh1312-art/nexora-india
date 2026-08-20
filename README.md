@@ -13,7 +13,11 @@ Required Cloudflare secrets/variables:
 - `JWT_SECRET`
 - `CJ_API_KEY` (preferred)
 - `CJ_ACCESS_TOKEN` (legacy fallback)
+- `CJ_REFRESH_TOKEN` (optional, used to renew access tokens)
+- `CJ_OPEN_ID` (optional, CJ webhook HMAC signing secret)
+- `CJ_AUTO_PAY` (optional, `"true"` to auto-pay CJ orders)
 - `CJ_USD_INR_RATE` (optional, default 90)
+- `GEMINI_API_KEY` (optional, for AI product descriptions)
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 

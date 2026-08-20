@@ -1,6 +1,7 @@
 (()=>{
 'use strict';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=n=>'₹'+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2});
 const normalizeUsername=v=>String(v||'').trim().replace(/^https?:\/\/t\.me\//i,'').replace(/^@/,'').replace(/[^A-Za-z0-9_]/g,'');
 const settings=async()=>{try{const r=await fetch('/api/store-settings',{cache:'no-store'});if(!r.ok)return {};return await r.json()}catch{return {}}};
 const supportHtml=(username)=>{const u=normalizeUsername(username);if(!u)return '<div class="notice">Telegram support is currently unavailable.</div>';return `<section class="nx-account-telegram" aria-label="Telegram Help and Support"><div class="nx-at-icon">💬</div><div class="nx-at-copy"><span>HELP & SUPPORT</span><h3>Need help with your order?</h3><p>Tell us your issue directly. Our support chat will open on Telegram.</p></div><a class="nx-at-btn" href="https://t.me/${encodeURIComponent(u)}" target="_blank" rel="noopener noreferrer">Chat on Telegram <b>→</b></a></section>`};

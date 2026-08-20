@@ -1,3 +1,4 @@
+import { isSafePublicUrl } from './_utils.js';
 const json = (data, status=200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
 
 async function getAdminUser(request, env) {
@@ -43,6 +44,7 @@ export async function onRequestPost({ request, env }) {
 
     if (imageUrl) {
       try {
+        if (!isSafePublicUrl(imageUrl)) throw new Error('unsafe image url');
         const ir = await fetch(imageUrl, { redirect: 'follow' });
         if (ir.ok) {
           const ct = (ir.headers.get('content-type') || '').split(';')[0].toLowerCase();
