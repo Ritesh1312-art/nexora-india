@@ -10,15 +10,22 @@ export async function onRequest(context){
   let limit=120;
   let windowSeconds=60;
   let sensitive=false;
+  let bucket=path;
 
   if(path==="/api/admin"||path==="/api/admin-login"){
     sensitive=true;
-    if(request.method==="POST" && (path==="/api/admin-login" || path==="/api/admin")){
+    let action="";
+    if(request.method==="POST"){
+      try{action=String((await request.clone().json())?.action||"").toLowerCase()}catch{}
+    }
+    if(path==="/api/admin-login" || action==="login"){
       limit=5;
       windowSeconds=15*60;
+      bucket=`${path}:login`;
     }else{
       limit=60;
       windowSeconds=60;
+      bucket=`${path}:${action||"request"}`;
     }
   }else if(path==="/api/order"){
     sensitive=true;
@@ -34,7 +41,7 @@ export async function onRequest(context){
     windowSeconds=60;
   }
 
-  const result=await rateLimit(request,context.env,path,limit,windowSeconds);
+  const result=await rateLimit(request,context.env,bucket,limit,windowSeconds);
   if(!result.allowed){
     if(result.failClosed && sensitive)return json({error:"Rate limiting service unavailable"},503,{headers:{"retry-after":String(result.retryAfter)}});
     if(!result.failClosed)return json({error:"Too many requests. Please try again later."},429,{headers:{"retry-after":String(result.retryAfter),"cache-control":"no-store"}});
