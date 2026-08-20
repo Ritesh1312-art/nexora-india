@@ -9,7 +9,7 @@ Required Cloudflare secrets/variables:
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY` (Supabase Publishable key)
 - `SUPABASE_SERVICE_ROLE_KEY` (or Supabase Secret key)
-- `ADMIN_PASSWORD`
+- `ADMIN_PASSWORD_HASH` (PBKDF2-SHA256 format: `pbkdf2-sha256$iterations$base64salt$base64hash`)
 - `JWT_SECRET`
 - `CJ_API_KEY` (preferred)
 - `CJ_ACCESS_TOKEN` (legacy fallback)
@@ -22,7 +22,7 @@ Optional DeoDap variables:
 - `DEODAP_DAILY_COLLECTIONS`
 - `DEODAP_JEWELLERY_COLLECTIONS`
 
-Never commit service-role/secret keys, supplier credentials, Telegram credentials or admin password to GitHub.
+Never commit service-role/secret keys, supplier credentials, Telegram credentials or the admin password/hash to GitHub.
 
 ## Production storefront
 
@@ -63,6 +63,10 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 
 Admin operations use HttpOnly JWT authentication and server-side Supabase secrets.
 
+## API abuse protection
+
+Cloudflare Pages Functions middleware now applies server-side, database-backed per-IP rate limiting to API routes. Sensitive admin, order, payment and admin-operation routes use stricter limits, while the admin login endpoints are limited to five attempts per 15 minutes per IP. Supabase Auth also provides its own authentication endpoint rate limits.
+
 ## Database hardening
 
 The production migrations add:
@@ -77,6 +81,7 @@ The production migrations add:
 - Required indexes for review/order relationships
 - Stale unpaid-order reservation expiry every five minutes
 - Offer usage committed only when payment is actually verified, with concurrency-safe limits
+- Database-backed API rate-limit counters with restricted service-role execution
 
 ## Supplier routing
 
