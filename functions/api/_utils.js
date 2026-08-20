@@ -66,4 +66,9 @@ export async function validAdmin(req,env){
   return data.sub==="admin"&&Number(data.exp)>Date.now();
  }catch{return false}
 }
-export async function telegram(env,text){if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)return;try{await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})})}catch{}}
+function sanitizeTelegram(text){return String(text??"")
+ .replace(/(^|\n)(Customer|Name|Phone|Email|Address|Address Line 1|Address Line 2|City|State|Pincode|Landmark)\s*:\s*[^\n]*/gi,"$1$2: [REDACTED]")
+ .replace(/(^|\n)UTR\s*:\s*[^\n]*/gi,"$1UTR: [REDACTED]")
+ .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,"[REDACTED_EMAIL]")
+ .replace(/(?<!\d)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\d)/g,"[REDACTED_PHONE]");}
+export async function telegram(env,text){if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)return;try{await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text:sanitizeTelegram(text)})})}catch{}}
