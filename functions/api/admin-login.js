@@ -1,13 +1,13 @@
-import {json,readBody,signAdmin} from "./_utils.js";
+import {json,readBody,signAdmin,verifyAdminPassword} from "./_utils.js";
 
 export async function onRequestPost({request,env}){
   try{
     const body=await readBody(request);
     const password=typeof body?.password==="string"?body.password:"";
-    if(!env.ADMIN_PASSWORD||!env.JWT_SECRET){
+    if(!env.ADMIN_PASSWORD_HASH||!env.JWT_SECRET){
       return json({ok:false,error:"Admin secrets are not configured"},500);
     }
-    if(!password || password!==env.ADMIN_PASSWORD){
+    if(!password || !(await verifyAdminPassword(password,env.ADMIN_PASSWORD_HASH))){
       return json({ok:false,error:"Invalid password"},401);
     }
     const token=await signAdmin(env);
