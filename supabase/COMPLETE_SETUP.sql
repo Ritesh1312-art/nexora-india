@@ -1,13 +1,19 @@
 -- ============================================================================
--- NEXORA-INDIA — COMPLETE DATABASE SETUP (idempotent)
+-- NEXORA-INDIA — COMPLETE DATABASE SETUP (idempotent, single-file)
 -- ----------------------------------------------------------------------------
--- Single-file base schema for the Nexora-India store on Supabase.
+-- FULL database schema for the Nexora-India store on Supabase.
 --
--- This file is the *base* schema. The hardening migrations in
--- supabase/migrations/ build on top of it (atomic stock reservation, data
--- integrity checks, RPC revokes, indexes, targeted offers, rate limiting).
--- Run this file FIRST in the Supabase SQL editor (or `supabase db push`
--- equivalent), then run the migrations in supabase/migrations/.
+-- THIS IS THE ONLY FILE YOU NEED TO RUN.
+-- It contains the complete base schema AND every hardening piece from
+-- supabase/migrations/ (atomic stock reservation, data-integrity constraints,
+-- hardened SECURITY DEFINER functions + privilege revokes, supplier queue
+-- trigger hardening, FK indexes, targeted offers, offer-usage atomicity,
+-- RLS auth-call optimization, order audit log, supplier-order idempotency).
+-- The supabase/migrations/ folder is kept for CI / reference only — running
+-- it again after this file is harmless (everything is idempotent).
+--
+-- HOW TO RUN: Supabase Dashboard -> SQL Editor -> New query -> paste the
+-- whole file -> Run. Safe to re-run any time.
 --
 -- Everything in this file is idempotent: it can be re-run safely.
 --   - CREATE TABLE / TYPE / SEQUENCE / INDEX ... IF NOT EXISTS
@@ -1492,16 +1498,26 @@ $$;
 -- ============================================================================
 -- 11. SEED DATA
 -- ============================================================================
-insert into public.categories (name, slug, description, active, sort_order, category_type)
+insert into public.categories (name, slug, description, active, sort_order, category_type, image_url, icon_url, banner_url)
 values
-  ('Footwear', 'footwear', 'Shoes, sneakers, sandals and slippers for men, women and kids.', true, 1, 'OWN'),
-  ('Kitchen Appliances', 'kitchen-appliances', 'Blenders, mixers, juicers, air fryers and kitchen essentials.', true, 2, 'OWN'),
-  ('Daily Use Products', 'daily-use-products', 'Household essentials, cleaning supplies, stationery and daily needs.', true, 3, 'OWN'),
-  ('Artificial Jewellery', 'artificial-jewellery', 'Artificial jewellery and accessories for every occasion.', true, 4, 'OWN'),
-  ('Electrical Appliances', 'electrical-appliances', 'Home electrical appliances with transparent MRP and delivery pricing.', true, 5, 'OWN')
+  ('Footwear', 'footwear', 'Footwear for men, women and kids — shoes, sneakers, sandals, slippers, sports and formal styles.', true, 1, 'OWN',
+   '/images/categories/footwear-banner.jpg', '/images/categories/footwear-icon.jpg', '/images/categories/footwear-banner.jpg'),
+  ('Kitchen Appliances', 'kitchen-appliances', 'Blenders, mixers, juicers, air fryers and kitchen essentials.', true, 2, 'OWN',
+   '/images/categories/kitchen-appliances-banner.jpg', '/images/categories/kitchen-appliances-icon.jpg', '/images/categories/kitchen-appliances-banner.jpg'),
+  ('Daily Use Products', 'daily-use-products', 'Household essentials, cleaning supplies, stationery and daily needs.', true, 3, 'OWN',
+   '/images/categories/daily-use-products-banner.jpg', '/images/categories/daily-use-products-icon.jpg', '/images/categories/daily-use-products-banner.jpg'),
+  ('Artificial Jewellery', 'artificial-jewellery', 'Artificial jewellery and accessories for every occasion.', true, 4, 'OWN',
+   '/images/categories/artificial-jewellery-banner.jpg', '/images/categories/artificial-jewellery-icon.jpg', '/images/categories/artificial-jewellery-banner.jpg'),
+  ('Electrical Appliances', 'electrical-appliances', 'Electrical fittings and appliances — sockets, switchboards (fan boards), switches, fans, wires and home electricals with transparent MRP and delivery pricing.', true, 5, 'OWN',
+   '/images/categories/electrical-appliances-banner.jpg', '/images/categories/electrical-appliances-icon.jpg', '/images/categories/electrical-appliances-banner.jpg')
 on conflict (slug) do update
   set name = excluded.name,
-      active = true;
+      description = excluded.description,
+      active = true,
+      image_url = excluded.image_url,
+      icon_url = excluded.icon_url,
+      banner_url = excluded.banner_url,
+      sort_order = excluded.sort_order;
 
 -- Single settings row (addressed as admin_settings?id=eq.true)
 insert into public.admin_settings
@@ -1521,5 +1537,120 @@ values
 on conflict (name) do nothing;
 
 -- ============================================================================
--- DONE. After this file, run the migrations in supabase/migrations/ in order.
+-- 12. HARDENING — MERGED FROM supabase/migrations/ (remaining pieces)
+-- ----------------------------------------------------------------------------
+-- The following four migration files were NOT yet part of this file; they are
+-- merged here so that one single run applies the complete hardened schema:
+--   1) harden_security_definer_functions.sql
+--   2) revoke_public_rpc_execute.sql
+--   3) optimize_rls_auth_calls.sql
+--   4) remove_redundant_product_identity_index.sql
+-- All other migrations were already merged into the sections above.
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 12.1 harden_security_definer_functions: pin search_path, restrict executors
+-- ----------------------------------------------------------------------------
+ALTER FUNCTION public.set_updated_at() SET search_path = public, pg_catalog;
+ALTER FUNCTION public.generate_order_number() SET search_path = public, pg_catalog;
+ALTER FUNCTION public.validate_electrical_product() SET search_path = public, pg_catalog;
+
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.handle_order_stock_after_payment() FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.queue_supplier_orders_after_payment() FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.record_offer_usage_on_verified_payment() FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.redeem_offer(uuid, uuid, numeric, integer) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.reserve_order_stock(jsonb) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.handle_new_user() TO service_role;
+GRANT EXECUTE ON FUNCTION public.handle_order_stock_after_payment() TO service_role;
+GRANT EXECUTE ON FUNCTION public.queue_supplier_orders_after_payment() TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_offer_usage_on_verified_payment() TO service_role;
+GRANT EXECUTE ON FUNCTION public.redeem_offer(uuid, uuid, numeric, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_order_stock(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.rls_auto_enable() TO service_role;
+
+-- ----------------------------------------------------------------------------
+-- 12.2 revoke_public_rpc_execute: remove inherited PUBLIC EXECUTE privileges
+-- ----------------------------------------------------------------------------
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.handle_order_stock_after_payment() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.queue_supplier_orders_after_payment() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.record_offer_usage_on_verified_payment() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.redeem_offer(uuid, uuid, numeric, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.reserve_order_stock(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION public.handle_new_user() TO service_role;
+GRANT EXECUTE ON FUNCTION public.handle_order_stock_after_payment() TO service_role;
+GRANT EXECUTE ON FUNCTION public.queue_supplier_orders_after_payment() TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_offer_usage_on_verified_payment() TO service_role;
+GRANT EXECUTE ON FUNCTION public.redeem_offer(uuid, uuid, numeric, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_order_stock(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.rls_auto_enable() TO service_role;
+
+-- ----------------------------------------------------------------------------
+-- 12.3 optimize_rls_auth_calls: evaluate auth.uid() once per statement
+-- (safe re-application; policies already exist from the sections above)
+-- ----------------------------------------------------------------------------
+ALTER POLICY profiles_own_read ON public.profiles USING ((select auth.uid()) = id);
+ALTER POLICY profiles_own_update ON public.profiles USING ((select auth.uid()) = id) WITH CHECK ((select auth.uid()) = id);
+
+ALTER POLICY addresses_own_read ON public.addresses USING ((select auth.uid()) = user_id);
+ALTER POLICY addresses_own_insert ON public.addresses WITH CHECK ((select auth.uid()) = user_id);
+ALTER POLICY addresses_own_update ON public.addresses USING ((select auth.uid()) = user_id) WITH CHECK ((select auth.uid()) = user_id);
+ALTER POLICY addresses_own_delete ON public.addresses USING ((select auth.uid()) = user_id);
+
+ALTER POLICY offer_targets_own_read ON public.offer_targets USING (user_id = (select auth.uid()));
+ALTER POLICY orders_own_read ON public.orders USING ((select auth.uid()) = user_id);
+ALTER POLICY order_items_own_read ON public.order_items USING (EXISTS (SELECT 1 FROM public.orders o WHERE o.id = order_items.order_id AND o.user_id = (select auth.uid())));
+ALTER POLICY order_history_own_read ON public.order_status_history USING (EXISTS (SELECT 1 FROM public.orders o WHERE o.id = order_status_history.order_id AND o.user_id = (select auth.uid())));
+ALTER POLICY payment_records_own_read ON public.payment_records USING (EXISTS (SELECT 1 FROM public.orders o WHERE o.id = payment_records.order_id AND o.user_id = (select auth.uid())));
+
+ALTER POLICY notifications_own_read ON public.notifications USING ((select auth.uid()) = user_id);
+ALTER POLICY notifications_own_update ON public.notifications USING ((select auth.uid()) = user_id) WITH CHECK ((select auth.uid()) = user_id);
+
+ALTER POLICY offers_visible_to_users ON public.offers USING (
+  active = true
+  AND admin_approved = true
+  AND starts_at <= now()
+  AND (ends_at IS NULL OR ends_at >= now())
+  AND (
+    target_type = 'ALL'::offer_target_type
+    OR (
+      target_type = 'SELECTED_USERS'::offer_target_type
+      AND EXISTS (
+        SELECT 1 FROM public.offer_targets ot
+        WHERE ot.offer_id = offers.id
+          AND ot.user_id = (select auth.uid())
+      )
+    )
+  )
+);
+
+-- ----------------------------------------------------------------------------
+-- 12.4 remove_redundant_product_identity_index
+-- ----------------------------------------------------------------------------
+DROP INDEX IF EXISTS public.products_source_identity_unique;
+
+-- ----------------------------------------------------------------------------
+-- 12.5 category-images storage bucket (admin image uploads, public read)
+-- ----------------------------------------------------------------------------
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('category-images', 'category-images', true, 6291456,
+        array['image/jpeg','image/png','image/webp','image/gif'])
+on conflict (id) do update
+  set public = true,
+      file_size_limit = 6291456,
+      allowed_mime_types = array['image/jpeg','image/png','image/webp','image/gif'];
+
+drop policy if exists "Public read category images" on storage.objects;
+create policy "Public read category images"
+  on storage.objects for select
+  using (bucket_id = 'category-images');
+
+-- ============================================================================
+-- DONE. This single file now contains the ENTIRE Nexora-India database setup
+-- (base schema + all hardening migrations merged). Run once, re-run any time.
 -- ============================================================================
