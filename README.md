@@ -10,7 +10,10 @@ Required Cloudflare secrets/variables:
 - `SUPABASE_ANON_KEY` (Supabase Publishable key)
 - `SUPABASE_SERVICE_ROLE_KEY` (or Supabase Secret key)
 - `ADMIN_PASSWORD_HASH` (PBKDF2-SHA256 format: `pbkdf2-sha256$iterations$base64salt$base64hash`)
+- `ADMIN_PASSWORD` (optional; plain-text fallback accepted only when `ADMIN_PASSWORD_HASH` is not set — prefer the hash)
 - `JWT_SECRET`
+- `WATCHDOG_SECRET` (protects `GET /api/watchdog`; watchdog refuses to run if unset)
+- `WATCHDOG_DEODAP_SYNC` (optional, `"true"` to run the DeoDap sync inside each watchdog run)
 - `CJ_API_KEY` (preferred)
 - `CJ_ACCESS_TOKEN` (legacy fallback)
 - `CJ_REFRESH_TOKEN` (optional, used to renew access tokens)
@@ -38,7 +41,7 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 - Persistent guest cart with local storage
 - Authenticated checkout with server-side price/stock validation
 - Optional guest checkout when enabled in Admin → Settings
-- Google customer sign-in via Supabase OAuth, plus email/password authentication
+- Customer email/password authentication via Supabase Auth
 - UPI intent/QR presentation and manual UTR verification
 - Customer orders, payment history, addresses, wishlist and notifications
 - Password reset and optional TOTP MFA enrollment/challenge
@@ -53,7 +56,7 @@ Never commit service-role/secret keys, supplier credentials, Telegram credential
 
 - Dashboard statistics
 - Product publishing, pricing, stock and variants
-- Add Product and Edit Product workflows
+- Add Product (full form with Gemini description generation, Save Draft / Save & Live) and Edit Product workflows
 - Gemini-assisted product descriptions
 - Payment verification/rejection
 - Supplier/shipping tracking updates with server-side status validation
@@ -69,7 +72,7 @@ Admin operations use HttpOnly JWT authentication and server-side Supabase secret
 
 ## API abuse protection
 
-Cloudflare Pages Functions middleware now applies server-side, database-backed per-IP rate limiting to API routes. Sensitive admin, order, payment and admin-operation routes use stricter limits, while the admin login endpoints are limited to five attempts per 15 minutes per IP. Supabase Auth also provides its own authentication endpoint rate limits.
+Cloudflare Pages Functions middleware now applies server-side, database-backed per-IP rate limiting to API routes. Sensitive admin, order, payment and admin-operation routes use stricter limits, while the admin login endpoints are limited to five attempts per 15 minutes per IP. Supabase Auth also provides its own authentication endpoint rate limits. The limiter is **fail-open**: if the Supabase rate-limit counter is unavailable, requests are allowed through instead of returning 503, so the store stays reachable during database hiccups (the limit is simply not enforced during the outage).
 
 ## Database hardening
 
@@ -102,9 +105,15 @@ UPI is intentionally manual-UTR verification because a plain UPI ID cannot indep
 
 The store's real UPI ID must be entered in **Admin → Settings** before the QR/UPI payment panel can show a live destination. No placeholder UPI ID is hard-coded.
 
-## Google OAuth configuration
+## Database setup
 
-The storefront contains the Google sign-in flow. Before customers can use it, enable the **Google provider** in Supabase Authentication and configure the Google OAuth client credentials plus the production redirect URL in Supabase. This is an external provider configuration and cannot be safely invented in code.
+`supabase/COMPLETE_SETUP.sql` is the single-file **base schema** (tables, enums, triggers, RLS policies, stock/offer/payment RPCs, rate-limit counter, 5 seed categories and the `admin_settings` row). It is fully idempotent and must be run **first** in the Supabase SQL editor; then run the hardening migrations in `supabase/migrations/` in file order. The API and client code only ever reference objects created by this file plus the migrations.
+
+## Watchdog
+
+`GET /api/watchdog` (or POST) is an operational health check protected by `WATCHDOG_SECRET` (query param `?secret=` or `Authorization: Bearer`). It reports Supabase health, live/low-stock product counts, pending payments, stale unpaid orders, open support tickets and stuck supplier orders, optionally runs the DeoDap sync (`WATCHDOG_DEODAP_SYNC=true`) and sends a Telegram summary. It refuses to run (403) when `WATCHDOG_SECRET` is not configured.
+
+The cron trigger lives in `worker/` (`watchdog-scheduler.js` + `wrangler.toml`, schedule `30 3,15 * * *` — minute 30 of 03:00 and 15:00 UTC). Deploy it as a separate Worker with `PAGES_URL` (the Pages deployment URL) and the same `WATCHDOG_SECRET`.
 
 ## Final external security setting
 

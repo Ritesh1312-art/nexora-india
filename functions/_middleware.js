@@ -43,8 +43,9 @@ export async function onRequest(context){
 
   const result=await rateLimit(request,context.env,bucket,limit,windowSeconds);
   if(!result.allowed){
-    if(result.failClosed && sensitive)return json({error:"Rate limiting service unavailable"},503,{headers:{"retry-after":String(result.retryAfter)}});
-    if(!result.failClosed)return json({error:"Too many requests. Please try again later."},429,{headers:{"retry-after":String(result.retryAfter),"cache-control":"no-store"}});
+    // rateLimit() fails open when the limiter backend is unavailable, so a
+    // 429 here always means the client actually exceeded its limit.
+    return json({error:"Too many requests. Please try again later."},429,{headers:{"retry-after":String(result.retryAfter),"cache-control":"no-store"}});
   }
   return context.next();
 }

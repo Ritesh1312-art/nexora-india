@@ -1,0 +1,11 @@
+# Cron trigger for the Nexora-India watchdog (see watchdog-scheduler.js).
+# Deploy with:  npx wrangler deploy (from this directory)
+# Required secrets/vars (never commit them):
+#   PAGES_URL        - your Cloudflare Pages deployment URL
+#   WATCHDOG_SECRET  - must match the WATCHDOG_SECRET secret on the Pages project
+name = "nexora-watchdog-scheduler"
+main = "watchdog-scheduler.js"
+compatibility_date = "2026-08-01"
+
+[triggers]
+crons = ["30 3,15 * * *"]
