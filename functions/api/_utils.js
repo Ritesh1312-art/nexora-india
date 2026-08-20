@@ -27,10 +27,18 @@ export async function rateLimit(request,env,route,limit,windowSeconds){
  const raw=`nexora-rate:${route}:${ip}`;
  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(raw));
  const key=b64u(digest);
- const r=await supabase(env,"rpc/consume_api_rate_limit",{method:"POST",body:JSON.stringify({p_key:key,p_limit:limit,p_window_seconds:windowSeconds})});
- if(!r.ok)return {allowed:false,failClosed:true,retryAfter:60};
+ let r;
+ try{
+  r=await supabase(env,"rpc/consume_api_rate_limit",{method:"POST",body:JSON.stringify({p_key:key,p_limit:limit,p_window_seconds:windowSeconds})});
+ }catch{
+  // Fail-open: the limiter backend (Supabase) is unreachable — allow traffic.
+  return {allowed:true,failOpen:true,retryAfter:0};
+ }
+ // Fail-open: if the rate-limit counter (Supabase RPC) is unreachable we must
+ // not take the whole store/admin offline. Availability wins over limiting.
+ if(!r.ok)return {allowed:true,failOpen:true,retryAfter:0};
  const d=await r.json().catch(()=>null);const row=Array.isArray(d)?d[0]:d;
- return {allowed:row?.allowed===true,failClosed:false,retryAfter:Math.max(1,Number(row?.retry_after_seconds||1))};
+ return {allowed:row?.allowed===true,failOpen:false,retryAfter:Math.max(1,Number(row?.retry_after_seconds||1))};
 }
 export async function verifyAdminPassword(password,storedHash){
  if(typeof password!=="string"||!password||typeof storedHash!=="string")return false;
@@ -50,6 +58,23 @@ export async function verifyAdminPassword(password,storedHash){
  }catch{return false}
 }
 export function b64u(bytes){let s="";if(typeof bytes==="string")s=bytes;else s=String.fromCharCode(...new Uint8Array(bytes));return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
+// Admin credential lookup: the PBKDF2 hash (ADMIN_PASSWORD_HASH) is the
+// preferred credential. A plain ADMIN_PASSWORD value is accepted as a
+// fallback when no hash is configured (handy for dev/staging setups).
+export function getAdminPasswordHash(env){
+ const hash=typeof env.ADMIN_PASSWORD_HASH==="string"?env.ADMIN_PASSWORD_HASH.trim():"";
+ const plain=typeof env.ADMIN_PASSWORD==="string"?env.ADMIN_PASSWORD.trim():"";
+ return {hash,plain};
+}
+function constantTimeStringEq(a,b){let diff=(a.length||0)^(b.length||0);const n=Math.max(a.length,b.length);for(let i=0;i<n;i++)diff|=(a.charCodeAt(i)||0)^(b.charCodeAt(i)||0);return diff===0}
+export async function checkAdminPassword(env,password){
+ const value=typeof password==="string"?password:"";
+ if(!value)return false;
+ const cfg=getAdminPasswordHash(env);
+ if(cfg.hash)return verifyAdminPassword(value,cfg.hash);
+ if(cfg.plain)return constantTimeStringEq(value,cfg.plain);
+ return false;
+}
 export function unb64u(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return atob(s)}
 export async function signAdmin(env){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.JWT_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);const now=Date.now();const payload=b64u(new TextEncoder().encode(JSON.stringify({sub:"admin",iat:now,exp:now+8*60*60*1000})));const sig=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(payload));return `${payload}.${b64u(sig)}`}
 export async function validAdmin(req,env){

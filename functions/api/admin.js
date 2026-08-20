@@ -1,26 +1,8 @@
-import {json,readBody,supabase,signAdmin,validAdmin,telegram,getSupabaseKey} from "./_utils.js";
+import {json,readBody,supabase,signAdmin,validAdmin,telegram,getSupabaseKey,getAdminPasswordHash,checkAdminPassword} from "./_utils.js";
 import {syncCJ} from "./cj.js";
 import {syncDeodap} from "./deodap.js";
 import {submitCJOrder} from "./cj-submit-order.js";
 async function readSupabaseResult(r){const text=await r.text();let data;try{data=JSON.parse(text)}catch{data=text}return {ok:r.ok,status:r.status,data};}
-async function verifyAdminPassword(password,storedHash){
- if(typeof password!=="string"||!password||typeof storedHash!=="string")return false;
- const parts=storedHash.split("$");
- if(parts.length!==4||parts[0]!=="pbkdf2-sha256")return false;
- const iterations=Number(parts[1]);
- if(!Number.isInteger(iterations)||iterations<100000||iterations>1000000)return false;
- try{
-  const salt=Uint8Array.from(atob(parts[2]),c=>c.charCodeAt(0));
-  const expected=Uint8Array.from(atob(parts[3]),c=>c.charCodeAt(0));
-  if(salt.length<16||expected.length!==32)return false;
-  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(password),"PBKDF2",false,["deriveBits"]);
-  const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations,hash:"SHA-256"},key,256);
-  const actual=new Uint8Array(bits);
-  let diff=actual.length^expected.length;
-  for(let i=0;i<actual.length;i++)diff|=actual[i]^expected[i];
-  return diff===0;
- }catch{return false}
-}
 async function prepareSupplierOrders(env,orderId){
  const ir=await supabase(env,`order_items?order_id=eq.${encodeURIComponent(orderId)}&select=id,product_id,quantity,total_cost_price,product_name,sku`);const items=await ir.json();
  if(!ir.ok||!Array.isArray(items))throw new Error(`Unable to load order items for supplier routing: ${JSON.stringify(items)}`);if(!items.length)return {created:0,manual:0};
@@ -39,7 +21,7 @@ async function releaseOrderStock(env,orderId){
 }
 export async function onRequestPost({request,env}){try{
  const b=await readBody(request);
- if(b.action==="login"){if(!env.ADMIN_PASSWORD_HASH||!env.JWT_SECRET)return json({error:"Admin secrets are not configured"},500);if(!(await verifyAdminPassword(b.password,env.ADMIN_PASSWORD_HASH)))return json({error:"Invalid password"},401);const t=await signAdmin(env);return json({ok:true},200,{headers:{"Set-Cookie":`nexora_admin=${t}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`}})}
+ if(b.action==="login"){const cred=getAdminPasswordHash(env);if(!(cred.hash||cred.plain)||!env.JWT_SECRET)return json({error:"Admin secrets are not configured"},500);if(!(await checkAdminPassword(env,b.password)))return json({error:"Invalid password"},401);const t=await signAdmin(env);return json({ok:true},200,{headers:{"Set-Cookie":`nexora_admin=${t}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`}})}
  if(b.action==="logout")return json({ok:true},200,{headers:{"Set-Cookie":"nexora_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"}});
  if(b.action==="session"){if(!(await validAdmin(request,env)))return json({ok:false},401);return json({ok:true})}
  if(!(await validAdmin(request,env)))return json({error:"Admin login required"},401);
