@@ -16,7 +16,8 @@ export async function onRequestPost({request,env}){try{
  if(!name||!phone||!address||!city||!state||!/^[0-9]{6}$/.test(pincode))return json({error:"Complete customer address is required and pincode must be 6 digits"},400);
  if(!u&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return json({error:"A valid email is required for guest checkout"},400);
  const utr=String(b.utr||"").trim();if(utr&&!/^[A-Za-z0-9]{6,64}$/.test(utr))return json({error:"Invalid UTR/reference. Use 6–64 letters or numbers."},400);
- const refCode=String(b.ref||"").trim();if(refCode&&!/^[A-Za-z0-9-]{4,24}$/.test(refCode))return json({error:"Invalid referral code"},400);
+ // Referral codes are canonical uppercase; normalize so users can type them in any case.
+ const refCode=String(b.ref||"").trim().toUpperCase();if(refCode&&!/^[A-Z0-9-]{4,24}$/.test(refCode))return json({error:"Invalid referral code"},400);
  let discount=0,offerId=null,offerCode=null;if(b.offer_code){if(!u)return json({error:"Offers require a signed-in account"},400);const offer=await validateOffer({code:String(b.offer_code).trim(),subtotal,quantity:totalQty,userId:u.id,env});if(!offer.valid)return json({error:offer.error},400);discount=Number(offer.discount_amount||0);offerId=offer.offer_id;offerCode=offer.code}
  // Free-delivery threshold semantics: a threshold <= 0 means "no free delivery"
  // (delivery charge always applies). A positive threshold waives delivery once
@@ -40,7 +41,7 @@ export async function onRequestPost({request,env}){try{
    const sr2=await supabase(env,"admin_settings?select=affiliate_commission_percent&limit=1");const sRows=await sr2.json().catch(()=>null);const defPct=Array.isArray(sRows)&&sRows[0]?Number(sRows[0].affiliate_commission_percent||0):0;
    const pct=aff.commission_percent!=null?Number(aff.commission_percent):defPct;
    const base=Math.max(0,subtotal-discount),commission=Number((base*pct/100).toFixed(2));
-   if(commission>0)await supabase(env,"affiliate_referrals",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({affiliate_id:aff.id,order_id:order.id,order_number:order.order_number,order_amount:base,commission_amount:commission,status:"PENDING"})});
+   if(commission>0)await supabase(env,"affiliate_referrals",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify({affiliate_id:aff.id,order_id:order.id,order_number:order.order_number,order_amount:base,commission_percent:pct,commission_amount:commission,status:"PENDING"})});
   }}catch{}}
  await telegram(env,`🛍️ NEXORA-INDIA NEW ORDER\nOrder: ${order.order_number}\nCustomer: ${name}\nPhone: ${phone}\nAmount: ₹${total}\nDiscount: ₹${discount}\nDelivery: ₹${shipping}\nPayment: ${order.payment_status}\nUTR: ${utr||"not submitted"}`);
  return json({ok:true,order_number:order.order_number,total_amount:total,discount_amount:discount,shipping_amount:shipping,stock_reserved:true,payment_status:order.payment_status,guest:!u});

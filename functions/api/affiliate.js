@@ -30,7 +30,8 @@ async function storeDefault(env){
 
 export async function onRequestGet({request,env}){
  try{
-  const url=new URL(request.url),code=String(url.searchParams.get("track")||"").trim();
+  // Codes are canonical uppercase (joined codes are generated uppercase).
+  const url=new URL(request.url),code=String(url.searchParams.get("track")||"").trim().toUpperCase();
   if(!CODE_RE.test(code))return json({error:"Invalid code"},400);
   const r=await supabase(env,`affiliates?code=eq.${encodeURIComponent(code)}&status=eq.active&select=id&limit=1`);
   const d=await r.json().catch(()=>null);
