@@ -11,6 +11,12 @@
 -- products) is only re-parented under Daily Use Products.
 -- ============================================================
 
+-- Older databases may carry a UNIQUE constraint on categories.name.
+-- Sub-categories legitimately repeat names under different parents
+-- ('Men' under Clothes AND Footwear), and every lookup in the app is
+-- by slug/id, so the name-level uniqueness must go. Slug stays unique.
+alter table public.categories drop constraint if exists categories_name_key;
+
 alter table public.categories add column if not exists parent_id uuid references public.categories(id) on delete set null;
 create index if not exists categories_parent_id_idx on public.categories(parent_id);
 
