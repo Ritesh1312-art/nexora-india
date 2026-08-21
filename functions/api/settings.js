@@ -16,7 +16,7 @@ export async function onRequestPost({request,env}){
   if(!(await validAdmin(request,env)))return json({error:"Admin login required"},401);
   const b=await readBody(request);
   const allowed={};
-  for(const k of ['store_name','store_email','telegram_username','upi_id','currency','guest_checkout_enabled','user_registration_enabled','store_enabled','auto_product_import_enabled','auto_stock_sync_enabled','auto_publish_products','minimum_profit_amount','minimum_profit_percent','delivery_enabled','default_delivery_charge','electrical_delivery_charge','free_delivery_min_amount'])if(Object.prototype.hasOwnProperty.call(b,k))allowed[k]=b[k];
+  for(const k of ['store_name','store_email','telegram_username','upi_id','currency','guest_checkout_enabled','user_registration_enabled','store_enabled','auto_product_import_enabled','auto_stock_sync_enabled','auto_publish_products','minimum_profit_amount','minimum_profit_percent','delivery_enabled','default_delivery_charge','electrical_delivery_charge','free_delivery_min_amount','affiliate_enabled','affiliate_commission_percent'])if(Object.prototype.hasOwnProperty.call(b,k))allowed[k]=b[k];
   allowed.updated_at=new Date().toISOString();
   const r=await supabase(env,"admin_settings?id=eq.true",{method:"PATCH",body:JSON.stringify(allowed)});
   const d=await r.json().catch(()=>({}));
