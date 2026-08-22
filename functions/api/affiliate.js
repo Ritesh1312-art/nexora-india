@@ -15,11 +15,31 @@ async function bearerUser(request,env){
 }
 const CODE_RE=/^[A-Za-z0-9-]{4,24}$/;
 function newCode(){return "NX"+crypto.randomUUID().replace(/-/g,"").slice(0,8).toUpperCase()}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function affiliateByUser(env,userId){
- const r=await supabase(env,`affiliates?user_id=eq.${encodeURIComponent(userId)}&select=id,user_id,code,display_name,payout_upi,status,commission_percent,created_at&limit=1`);
- const d=await r.json().catch(()=>null);
- if(!r.ok)throw new Error("Unable to load affiliate profile");
- return Array.isArray(d)?(d[0]||null):null;
+ // 3-tier fallback + retries: a stale prod shape (missing commission_percent
+ // before the 2026-08-22 migration) or a transient network error must never
+ // surface as a dead-end "Affiliate API error".
+ const tiers=[
+  "id,user_id,code,display_name,payout_upi,status,commission_percent,created_at",
+  "id,user_id,code,display_name,payout_upi,status,created_at",
+  "id,user_id,code,display_name,payout_upi,status"
+ ];
+ let lastErr=null;
+ for(const cols of tiers){
+  for(let attempt=0;attempt<2;attempt++){
+   try{
+    const r=await supabase(env,`affiliates?user_id=eq.${encodeURIComponent(userId)}&select=${cols}&limit=1`);
+    const d=await r.json().catch(()=>null);
+    if(r.ok)return Array.isArray(d)?(d[0]||null):null;
+    lastErr=d;
+    // Schema-level failure → drop the missing column and try the next tier.
+    if(/commission_percent|does not exist|schema cache/i.test(String(d?.message||"")))break;
+    if(attempt===0)await sleep(300);
+   }catch(e){lastErr=e;if(attempt===0)await sleep(300);}
+  }
+ }
+ throw new Error("Unable to load affiliate profile"+(lastErr?`: ${String(lastErr?.message||lastErr||"")}`:""));
 }
 async function storeDefault(env){
  const r=await supabase(env,"admin_settings?select=affiliate_enabled,affiliate_commission_percent&limit=1");
