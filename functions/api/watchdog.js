@@ -80,11 +80,21 @@ export async function onRequest(context){
     if(openTickets.rows.length>10)report.issues.push(`${openTickets.rows.length} support tickets open`);
     if(stuckSupplier.rows.length>0)report.issues.push(`${stuckSupplier.rows.length} supplier orders stuck in PENDING/SUBMITTING`);
    }
-   // 3) Optional DeoDap sync
+   // 3) Optional DeoDap sync — chunked: continue from the returned cursor for
+   // at most 6 slices so one watchdog invocation stays inside the Cloudflare
+   // subrequest/CPU budget while still finishing the whole collection list.
    if(String(env.WATCHDOG_DEODAP_SYNC||"").toLowerCase()==="true"&&report.supabase==="ok"){
     try{
-     const d=await syncDeodap(env,supabase);
-     report.deodap={ok:true,daily:d.daily,jewellery:d.jewellery,imported:d.imported};
+     let cursor=0,slices=0,acc={daily:0,jewellery:0,imported:0},last=null;
+     while(slices<6){
+      last=await syncDeodap(env,supabase,{cursor});
+      acc.daily+=last.daily||0;acc.jewellery+=last.jewellery||0;acc.imported+=last.imported||0;
+      slices++;
+      if(last.done)break;
+      cursor=last.cursor;
+     }
+     report.deodap={ok:true,daily:acc.daily,jewellery:acc.jewellery,imported:acc.imported,slices,done:!!last?.done};
+     if(!last?.done)report.issues.push(`DeoDap sync not finished in ${slices} watchdog slices (continue in next run)`);
     }catch(e){
      report.deodap={ok:false,error:String(e?.message||e)};
      report.issues.push(`DeoDap sync failed: ${String(e?.message||e)}`);
