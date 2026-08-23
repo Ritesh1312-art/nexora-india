@@ -19,7 +19,22 @@ function textOf(p){return [p.nameEn,p.threeCategoryName,p.twoCategoryName,p.oneC
 const GROUPS={footwear:{aliases:["Footwear","Shoes","Footwear Products"],keywords:["shoes","sneakers","sandals","slippers","boots","loafers","heels","flats","running shoes","footwear"]},kitchen:{aliases:["Kitchen Appliances","Kitchen appliance","Kitchen & Home Appliances"],keywords:["kitchen appliance","blender","mixer grinder","mixer","juicer","chopper","air fryer","electric kettle","kettle","toaster","sandwich maker","rice cooker","coffee maker","food processor","induction","electric cooker"]}};
 async function searchProducts(token,keyword,page=1,size=100){const u=new URL(`${CJ_BASE}/product/listV2`);u.searchParams.set("page",String(page));u.searchParams.set("size",String(size));u.searchParams.set("keyWord",keyword);u.searchParams.set("features","enable_category");const r=await fetch(u,{headers:{"CJ-Access-Token":token}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200){const code=d.code!=null?`code ${d.code}`:`HTTP ${r.status}`;const e=new Error(`CJ product query failed for ${keyword} (${code}): ${String(d.message||JSON.stringify(d))}`);e.cjCode=d.code;e.requestId=d.requestId;throw e;}return (d.data?.content||[]).flatMap(x=>x.productList||[]);}
 async function inventoryByProductId(token,pid){const u=new URL(`${CJ_BASE}/product/stock/getInventoryByPid`);u.searchParams.set("pid",String(pid));const r=await fetch(u,{headers:{"CJ-Access-Token":token}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200)return null;const inventories=Array.isArray(d.data?.inventories)?d.data.inventories:[];const totals=inventories.map(x=>Number(x.totalInventoryNum)).filter(Number.isFinite).filter(n=>n>=0);if(totals.length)return Math.max(0,...totals);const variants=Array.isArray(d.data?.variantInventories)?d.data.variantInventories:[];const variantTotals=variants.flatMap(v=>Array.isArray(v.inventory)?v.inventory:[]).map(x=>Number(x.totalInventory)).filter(Number.isFinite).filter(n=>n>=0);return variantTotals.length?Math.max(0,...variantTotals):null;}
-async function upsertBatch(env,supabase,rows){if(!rows.length)return;const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(rows)});if(!r.ok){const text=await r.text();throw new Error(`Supabase CJ batch upsert failed (${r.status}): ${text}`);}}
+// PostgREST bulk-upsert requires every object in ONE POST to carry the SAME
+// keys (PGRST102 "All object keys must match"). Price-preserve rows (exSell>0)
+// drop the selling/suggested keys while heal/new rows keep them — so rows are
+// grouped by their exact key-set and each group is POSTed separately.
+async function upsertBatch(env,supabase,rows){
+ if(!rows.length)return;
+ const groups=new Map();
+ for(const row of rows){
+  const sig=Object.keys(row).sort().join(" ");
+  const g=groups.get(sig);if(g)g.push(row);else groups.set(sig,[row]);
+ }
+ for(const group of groups.values()){
+  const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(group)});
+  if(!r.ok){const text=await r.text();throw new Error(`Supabase CJ batch upsert failed (${r.status}): ${text}`);}
+ }
+}
 async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price&source=eq.CJ");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing CJ products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,Number(x.selling_price||0)||0)}return m;}
 // CJ listV2 prices can arrive as RANGE strings like "34.99--40.99" (variant/MOQ
 // dependent). Number() of that is NaN → cost silently became 0 and products
