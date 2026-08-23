@@ -89,7 +89,10 @@ async function enrollMfa(){const box=$('#mfaBox');if(!box)return;
 
     if(r.error)throw r.error;
 
-    const f=r.data||{},qr=String(f.totp?.qr_code||''),secret=String(f.totp?.secret||'');
+    const f=r.data||{},serverQr=String(f.totp?.qr_code||''),secret=String(f.totp?.secret||'');
+    const uri=String(f.totp?.uri||'')||(secret?`otpauth://totp/Nexora-India:${encodeURIComponent(state.session?.user?.email||'user')}?${new URLSearchParams({secret,issuer:'Nexora-India'})}`:'');
+    if(!uri&&!secret)throw Error('Supabase ne TOTP details nahi di — dobara try karo.');
+    // Server ka qr_code SVG kabhi-kabhi aata hi nahi — isliye QR client-side banta hai (qrcode-generator lib).
 
     box.innerHTML=`<div class="mfa-enroll"><div class="qr-slot"></div><p>Authenticator app (Google/Microsoft Authenticator, Authy) kholo aur <b>+ / Add account</b> dabao.<br>QR scan karo — agar QR na dikhe to app me <b>manual entry / setup key</b> chun kar ye secret daal do: <code>${esc(secret)}</code></p><input id="mfaEnrollCode" class="input" inputmode="numeric" maxlength="6" placeholder="6-digit code"><button class="btn" id="verifyMfa">Enable</button><div id="mfaMsg"></div></div>`;
 
@@ -98,12 +101,13 @@ async function enrollMfa(){const box=$('#mfaBox');if(!box)return;
     // kar dete hain; inline DOM un sab (aur CSP img-src) se bachkar chalta hai.
 
     const slot=box.querySelector('.qr-slot');
-
-    if(/^\s*<svg[\s>]/i.test(qr)){slot.innerHTML=qr}
-
-    else if(qr){slot.innerHTML=`<img src="data:image/svg+xml;utf8,${encodeURIComponent(qr)}" alt="Scan with authenticator">`}
-
-    else{slot.innerHTML='<div class="notice">QR render nahi ho paya — upar wala secret manually daal do, wahi kaafi hai.</div>'}
+    let rendered=false;
+    if(uri&&window.qrcode){try{const q=window.qrcode(0,'M');q.addData(uri);q.make();slot.innerHTML=q.createSvgTag({cellSize:4,margin:2});const sv=slot.querySelector('svg');if(sv){sv.setAttribute('style','width:230px;max-width:100%;height:auto;background:#fff;padding:10px;border-radius:12px;display:block');rendered=true}}catch{}}
+    // Library block ho gayi ho to fallbacks: server ka SVG, phir data-URI img.
+    if(!rendered&&/^\s*<svg[\s>]/i.test(serverQr)){
+      slot.innerHTML=serverQr;const sv=slot.querySelector('svg');if(sv){sv.setAttribute('style','width:230px;max-width:100%;height:auto;background:#fff;padding:10px;border-radius:12px;display:block');rendered=true}}
+    if(!rendered&&serverQr){slot.innerHTML=`<img src="data:image/svg+xml;utf8,${encodeURIComponent(serverQr)}" alt="Scan with authenticator" style="width:230px;max-width:100%;background:#fff;padding:10px;border-radius:12px;display:block">`;rendered=true}
+    if(!rendered)slot.innerHTML='<div class="notice">QR generate nahi ho paya — upar wala secret app me manually daal do, wahi kaafi hai.</div>';
 
     $('#verifyMfa').onclick=async()=>{try{const ch=await state.sb.auth.mfa.challenge({factorId:f.id});if(ch.error)throw ch.error;const v=await state.sb.auth.mfa.verify({factorId:f.id,challengeId:ch.data.id,code:$('#mfaEnrollCode').value.trim()});if(v.error)throw v.error;try{state.session=(await state.sb.auth.getSession()).data.session||state.session}catch{}toast('Authenticator enabled');securityTab($('#accountPanel'))}catch(e){$('#mfaMsg').innerHTML=`<div class="notice error">${esc(e.message)}</div>`}}
 
