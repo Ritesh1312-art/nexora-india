@@ -20,7 +20,11 @@ const GROUPS={footwear:{aliases:["Footwear","Shoes","Footwear Products"],keyword
 async function searchProducts(token,keyword,page=1,size=100){const u=new URL(`${CJ_BASE}/product/listV2`);u.searchParams.set("page",String(page));u.searchParams.set("size",String(size));u.searchParams.set("keyWord",keyword);u.searchParams.set("features","enable_category");const r=await fetch(u,{headers:{"CJ-Access-Token":token}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200){const code=d.code!=null?`code ${d.code}`:`HTTP ${r.status}`;const e=new Error(`CJ product query failed for ${keyword} (${code}): ${String(d.message||JSON.stringify(d))}`);e.cjCode=d.code;e.requestId=d.requestId;throw e;}return (d.data?.content||[]).flatMap(x=>x.productList||[]);}
 async function inventoryByProductId(token,pid){const u=new URL(`${CJ_BASE}/product/stock/getInventoryByPid`);u.searchParams.set("pid",String(pid));const r=await fetch(u,{headers:{"CJ-Access-Token":token}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200)return null;const inventories=Array.isArray(d.data?.inventories)?d.data.inventories:[];const totals=inventories.map(x=>Number(x.totalInventoryNum)).filter(Number.isFinite).filter(n=>n>=0);if(totals.length)return Math.max(0,...totals);const variants=Array.isArray(d.data?.variantInventories)?d.data.variantInventories:[];const variantTotals=variants.flatMap(v=>Array.isArray(v.inventory)?v.inventory:[]).map(x=>Number(x.totalInventory)).filter(Number.isFinite).filter(n=>n>=0);return variantTotals.length?Math.max(0,...variantTotals):null;}
 async function upsertBatch(env,supabase,rows){if(!rows.length)return;const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(rows)});if(!r.ok){const text=await r.text();throw new Error(`Supabase CJ batch upsert failed (${r.status}): ${text}`);}}
-async function getExistingProductIds(env,supabase){const r=await supabase(env,"products?select=source_product_id&source=eq.CJ");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing CJ products before sync: ${JSON.stringify(d)}`);return new Set(d.map(x=>String(x.source_product_id||"")).filter(Boolean));}
+async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price&source=eq.CJ");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing CJ products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,Number(x.selling_price||0)||0)}return m;}
+// CJ listV2 prices can arrive as RANGE strings like "34.99--40.99" (variant/MOQ
+// dependent). Number() of that is NaN → cost silently became 0 and products
+// synced at ₹0. parseMoney extracts the first real number from any shape.
+function parseMoney(v){const m=String(v??"").replace(/,/g,"").match(/\d+(?:\.\d+)?/);return m?Number(m[0]):0}
 function parseCursor(raw){const n=Number(raw||0);if(!Number.isFinite(n)||n<0)return {keywordIndex:0,offset:0};return {keywordIndex:Math.floor(n/CURSOR_STEP),offset:n%CURSOR_STEP};}
 
 export async function syncCJ(env,supabase,opts={}){
@@ -40,7 +44,7 @@ export async function syncCJ(env,supabase,opts={}){
  if(!Array.isArray(categories))throw new Error(`Could not load store categories: ${JSON.stringify(categories)}`);
  const footwearCategory=categoryId(categories,GROUPS.footwear.aliases),kitchenCategory=categoryId(categories,GROUPS.kitchen.aliases);
  if(!footwearCategory||!kitchenCategory)throw new Error(`CJ category mapping missing. Need Footwear and Kitchen Appliances. Found: ${categories.map(c=>c.name).join(", ")}`);
- const existingIds=await getExistingProductIds(env,supabase);
+ const existingPrices=await getExistingProducts(env,supabase);
  let autoPublish=false;
  try{const sr=await supabase(env,"admin_settings?select=auto_publish_products&limit=1");const sd=await sr.json().catch(()=>null);autoPublish=sr.ok&&Array.isArray(sd)&&sd[0]?sd[0].auto_publish_products===true:false}catch{}
  const supplierDeliveryCharge=Number(env.CJ_DELIVERY_CHARGE||0)||0;
@@ -74,20 +78,22 @@ export async function syncCJ(env,supabase,opts={}){
    const isMatch=group==="footwear"?/(shoe|footwear|sneaker|sandal|slipper|boot|loafer|heel|flat|running shoes)/i.test(text):/(kitchen|appliance|blender|mixer|juicer|chopper|air fryer|kettle|toaster|sandwich maker|rice cooker|coffee maker|food processor|induction|electric cooker)/i.test(text);
    if(!isMatch)continue;
    seen.add(String(id));
-   const costUsd=Number(p.nowPrice||p.discountPrice||p.sellPrice||0)||0,cost=Number((costUsd*inrRate).toFixed(2)),listStock=Math.max(0,Number(p.warehouseInventoryNum||p.totalVerifiedInventory||0)||0),categoryIdValue=group==="footwear"?footwearCategory:kitchenCategory;
+   const costUsd=[p.nowPrice,p.discountPrice,p.sellPrice].map(parseMoney).find(n=>n>0)||0,cost=Number((costUsd*inrRate).toFixed(2)),listStock=Math.max(0,Number(p.warehouseInventoryNum||p.totalVerifiedInventory||0)||0),categoryIdValue=group==="footwear"?footwearCategory:kitchenCategory;
    const payload={name:p.nameEn||"CJ Product",source:"CJ",source_product_id:String(id),source_sku:p.sku||p.spu||null,category_id:categoryIdValue,image_url:p.bigImage||p.productImage||p.imageUrl||null,cost_price:cost,suggested_price:Number((cost*1.5).toFixed(2)),selling_price:Number((cost*1.5).toFixed(2)),stock:listStock,stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};
-   if(!existingIds.has(String(id))){
+   const exSell=existingPrices.get(String(id));if(exSell===undefined){
     // New supplier products stay unpublished for admin review unless
     // auto_publish_products is enabled in Store settings.
     if(autoPublish){payload.active=true;payload.approved_by_admin=true;payload.approved_at=new Date().toISOString()}else{payload.active=false;payload.approved_by_admin=false;}
     // Optional per-supplier default delivery charge (CJ_DELIVERY_CHARGE env);
     // applied only to new rows so admin edits are never overwritten.
     if(supplierDeliveryCharge>0)payload.delivery_charge=supplierDeliveryCharge;
-   }else{
-    // Existing products: refresh cost/stock/image but NEVER overwrite the
-    // admin's edited selling/suggested prices on re-sync.
+   }else if(exSell>0){
+    // Existing products with a REAL price: refresh cost/stock/image but NEVER
+    // overwrite the admin's edited selling/suggested prices on re-sync.
     delete payload.suggested_price;delete payload.selling_price;
    }
+   // exSell 0/missing = old ₹0-sync bug — payload keeps selling/suggested so
+   // this re-sync heals those rows automatically.
    const item={payload,pid:String(id)};
    if(inventoryBudget>0){inventoryBudget--;const stock=await inventoryByProductId(token,item.pid);if(stock!==null)item.payload.stock=Math.max(0,stock);}
    rows[group].push(item);
