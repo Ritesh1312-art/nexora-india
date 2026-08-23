@@ -23,7 +23,22 @@ function payloadForProduct(p,categoryIdValue,exSell,opts={}){const v=p.variants?
  delete row.suggested_price;delete row.selling_price}
  // exSell 0/missing = old ₹0-sync bug — row keeps selling/suggested so re-sync heals them.
  return row}
-async function upsertBatch(env,supabase,rows){if(!rows.length)return;const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(rows)});if(!r.ok)throw new Error(`Supabase DeoDap batch upsert failed (${r.status}): ${await r.text()}`)}
+// PostgREST bulk-upsert requires every object in ONE POST to carry the SAME
+// keys (PGRST102 "All object keys must match"). Price-preserve rows (exSell>0)
+// drop the selling/suggested keys while heal/new rows keep them — so rows are
+// grouped by their exact key-set and each group is POSTed separately.
+async function upsertBatch(env,supabase,rows){
+ if(!rows.length)return;
+ const groups=new Map();
+ for(const row of rows){
+  const sig=Object.keys(row).sort().join(" ");
+  const g=groups.get(sig);if(g)g.push(row);else groups.set(sig,[row]);
+ }
+ for(const group of groups.values()){
+  const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(group)});
+  if(!r.ok){const text=await r.text();throw new Error(`Supabase DeoDap batch upsert failed (${r.status}): ${text}`);}
+ }
+}
 async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price&source=eq.DEODAP");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing DeoDap products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,Number(x.selling_price||0)||0)}return m}
 
 export async function syncDeodap(env,supabase,opts={}){

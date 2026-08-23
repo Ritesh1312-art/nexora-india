@@ -51,4 +51,17 @@ async function generateDescription(env,b){
  const text=d?.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('').trim();if(!text)return json({error:'Gemini returned no description'},502);return json({ok:true,description:text,model:'gemini-2.5-flash',image_analyzed:!!image});
 }
 
-export async function onRequestPost({request,env}){try{if(!(await validAdmin(request,env)))return json({error:'Admin login required'},401);const b=await readBody(request);if(b.action==='generate_description')return generateDescription(env,b);if(b.action==='save_product')return saveProduct(env,b);return json({error:'Unknown admin-product action'},400)}catch(e){return json({error:'Admin product operation failed',details:String(e?.message||e)},500)}}
+// Admin-requested cleanup: LIVE = active:true AND approved_by_admin:true.
+// Everything else (pending supplier rows, ₹0-price rows, drafts — any source)
+// is deleted in one statement. `not.is.true` also matches NULL, so half-live
+// rows cannot survive. Child tables referencing products are ON DELETE CASCADE
+// or SET NULL (see supabase/COMPLETE_SETUP.sql), so a bulk delete is safe.
+async function purgeNonLive(env){
+ const filter='or=(active.not.is.true,approved_by_admin.not.is.true)';
+ const r=await supabase(env,`products?${filter}`,{method:'DELETE',headers:{Prefer:'count=exact'}});
+ if(!r.ok){const d=await r.json().catch(()=>null);return json({error:'Non-live products delete nahi ho paye',details:d},400)}
+ const m=String(r.headers.get('content-range')||'').match(/\/(\d+)\s*$/);
+ return json({ok:true,deleted:m?Number(m[1]):null});
+}
+
+export async function onRequestPost({request,env}){try{if(!(await validAdmin(request,env)))return json({error:'Admin login required'},401);const b=await readBody(request);if(b.action==='generate_description')return generateDescription(env,b);if(b.action==='save_product')return saveProduct(env,b);if(b.action==='purge_non_live')return purgeNonLive(env);return json({error:'Unknown admin-product action'},400)}catch(e){return json({error:'Admin product operation failed',details:String(e?.message||e)},500)}}
