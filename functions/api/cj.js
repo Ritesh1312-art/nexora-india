@@ -35,7 +35,7 @@ async function upsertBatch(env,supabase,rows){
   if(!r.ok){const text=await r.text();throw new Error(`Supabase CJ batch upsert failed (${r.status}): ${text}`);}
  }
 }
-async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price&source=eq.CJ");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing CJ products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,Number(x.selling_price||0)||0)}return m;}
+async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price,active,approved_by_admin&source=eq.CJ");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing CJ products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,{sell:Number(x.selling_price||0)||0,active:x.active===true,approved:x.approved_by_admin===true})}return m;}
 // CJ listV2 prices can arrive as RANGE strings like "34.99--40.99" (variant/MOQ
 // dependent). Number() of that is NaN → cost silently became 0 and products
 // synced at ₹0. parseMoney extracts the first real number from any shape.
@@ -65,7 +65,7 @@ export async function syncCJ(env,supabase,opts={}){
  const supplierDeliveryCharge=Number(env.CJ_DELIVERY_CHARGE||0)||0;
  const inrRate=await usdInrRate(env);
  const seen=new Set(),rows={footwear:[],kitchen:[]};
- let inventoryBudget=invPerRun;
+ let inventoryBudget=(opts.light?Math.min(invPerRun,3):invPerRun),skippedNoStock=0,skippedUnverified=0;
  let keywordIndex=start.keywordIndex,offset=start.offset,cursor=null;
  for(;keywordIndex<endIndex;keywordIndex++){
   const [group,keyword]=queries[keywordIndex];
@@ -95,7 +95,7 @@ export async function syncCJ(env,supabase,opts={}){
    seen.add(String(id));
    const costUsd=[p.nowPrice,p.discountPrice,p.sellPrice].map(parseMoney).find(n=>n>0)||0,cost=Number((costUsd*inrRate).toFixed(2)),listStock=Math.max(0,Number(p.warehouseInventoryNum||p.totalVerifiedInventory||0)||0),categoryIdValue=group==="footwear"?footwearCategory:kitchenCategory;
    const payload={name:p.nameEn||"CJ Product",source:"CJ",source_product_id:String(id),source_sku:p.sku||p.spu||null,category_id:categoryIdValue,image_url:p.bigImage||p.productImage||p.imageUrl||null,cost_price:cost,suggested_price:Number((cost*1.5).toFixed(2)),selling_price:Number((cost*1.5).toFixed(2)),stock:listStock,stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};
-   const exSell=existingPrices.get(String(id));if(exSell===undefined){
+   const ex=existingPrices.get(String(id)),isNew=ex===undefined,exSell=ex?ex.sell:undefined;if(isNew){
     // New supplier products stay unpublished for admin review unless
     // auto_publish_products is enabled in Store settings.
     if(autoPublish){payload.active=true;payload.approved_by_admin=true;payload.approved_at=new Date().toISOString()}else{payload.active=false;payload.approved_by_admin=false;}
@@ -109,9 +109,24 @@ export async function syncCJ(env,supabase,opts={}){
    }
    // exSell 0/missing = old ₹0-sync bug — payload keeps selling/suggested so
    // this re-sync heals those rows automatically.
-   const item={payload,pid:String(id)};
-   if(inventoryBudget>0){inventoryBudget--;const stock=await inventoryByProductId(token,item.pid);if(stock!==null)item.payload.stock=Math.max(0,stock);}
-   rows[group].push(item);
+   // STOCK GATE (owner rule): only products with CONFIRMED supplier stock are
+   // imported/kept. List-level stock first; the per-product inventory API is
+   // consulted only within this run's budget. Unconfirmed = skipped — no
+   // guessing. Existing rows confirmed out-of-stock are auto-delisted into
+   // drafts (site se turant hat jaate hain) and auto-relisted when stock
+   // returns (only if the admin had approved them earlier).
+   let verified=listStock>0?listStock:null;
+   if(verified===null&&inventoryBudget>0){inventoryBudget--;const st=await inventoryByProductId(token,String(id));if(st!==null)verified=Math.max(0,st);}
+   if(verified===null){skippedUnverified++;continue}
+   if(verified<=0){
+    if(isNew){skippedNoStock++;continue}
+    payload.stock=0;
+    if(ex.active)payload.active=false;
+   }else{
+    payload.stock=verified;
+    if(!isNew&&!ex.active&&ex.approved)payload.active=true;
+   }
+   rows[group].push({payload,pid:String(id)});
   }
   if(products.length===pageSize&&rows[group].length<maxPerCategory){
    // Keyword page may have more results — resume on the next page next run.
@@ -124,5 +139,5 @@ export async function syncCJ(env,supabase,opts={}){
  await upsertBatch(env,supabase,all);
  const done=!cursor&&keywordIndex>=queries.length;
  if(!done&&!cursor)cursor=keywordIndex*100000+0;
- return {footwear:rows.footwear.length,kitchen:rows.kitchen.length,imported:all.length,auto_publish:autoPublish,done,cursor,warnings,errors:warnings};
+ return {footwear:rows.footwear.length,kitchen:rows.kitchen.length,imported:all.length,skipped_no_stock:skippedNoStock,skipped_unverified:skippedUnverified,auto_publish:autoPublish,done,cursor,warnings,errors:warnings};
 }

@@ -13,7 +13,27 @@ async function fetchCollectionSafe(handle){try{return await fetchCollection(hand
 function findCategory(categories,aliases){const wanted=aliases.map(x=>x.toLowerCase());return categories.find(c=>wanted.includes(String(c.name||"").trim().toLowerCase()))?.id||null}
 function bySlug(categories,s){return categories.find(c=>String(c.slug||"").toLowerCase()===s)?.id||null}
 function availabilityForProduct(p){const variants=Array.isArray(p.variants)?p.variants:[];const quantities=variants.map(v=>Number(v.inventory_quantity)).filter(Number.isFinite).filter(n=>n>=0);if(quantities.length)return{available:quantities.some(n=>n>0),stock:Math.max(0,...quantities),authoritative:true};const flags=variants.map(v=>v.available).filter(v=>typeof v==="boolean");if(flags.length)return{available:flags.some(Boolean),stock:0,authoritative:false};if(typeof p.available==="boolean")return{available:p.available,stock:0,authoritative:false};return{available:null,stock:null,authoritative:false}}
-function payloadForProduct(p,categoryIdValue,exSell,opts={}){const v=p.variants?.[0]||{},price=moneyNumber(v.price||p.price||0),suggested=Number((price*1.5).toFixed(2)),availability=availabilityForProduct(p);const row={name:p.title||"DeoDap Product",slug:p.handle||null,description:stripHtml(p.body_html),source:"DEODAP",source_product_id:String(p.id),source_sku:v.sku||null,category_id:categoryIdValue,image_url:imageUrl(p),cost_price:price,suggested_price:suggested,selling_price:suggested,...(availability.stock!=null?{stock:availability.stock}:{}),stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};if(exSell===undefined){// New supplier products stay unpublished for admin review unless the admin
+function payloadForProduct(p,categoryIdValue,ex,opts={}){
+ const v=p.variants?.[0]||{},price=moneyNumber(v.price||p.price||0),suggested=Number((price*1.5).toFixed(2)),availability=availabilityForProduct(p);
+ // Deodap (Shopify) mostly runs UNTRACKED inventory: variants carry only an
+ // `available` flag and no quantity. available:true then means "fulfilled on
+ // demand" — map it to a default stock (env-tunable) instead of the old 0
+ // which made every Deodap product show "Currently unavailable" and blocked
+ // the zero-stock live rule.
+ if(availability.available===true&&!availability.authoritative)availability.stock=Math.max(1,Number(opts.untrackedStock||25));
+ const exSell=ex?ex.sell:undefined;
+ // STOCK GATE (owner rule): only confirmed-in-stock products are imported.
+ if(availability.available!==true){
+  // New product with no confirmed stock → never imported.
+  if(ex===undefined)return null;
+  // Existing product now confirmed out-of-stock → zero it and auto-delist
+  // into drafts. Site turant mirror hoti hai; stock wapas aane pe niche
+  // wala relist rule use dobara live kar dega (agar approved hai).
+  const oos={name:p.title||"DeoDap Product",source:"DEODAP",source_product_id:String(p.id),stock:0,stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};
+  if(ex.active)oos.active=false;
+  return oos;
+ }
+ const row={name:p.title||"DeoDap Product",slug:p.handle||null,description:stripHtml(p.body_html),source:"DEODAP",source_product_id:String(p.id),source_sku:v.sku||null,category_id:categoryIdValue,image_url:imageUrl(p),cost_price:price,suggested_price:suggested,selling_price:suggested,...(availability.stock!=null?{stock:availability.stock}:{}),stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};if(exSell===undefined){// New supplier products stay unpublished for admin review unless the admin
  // has enabled auto_publish_products in Store settings.
  if(opts.publish===true){row.active=true;row.approved_by_admin=true;row.approved_at=new Date().toISOString()}else{row.active=false;row.approved_by_admin=false}
  // Optional per-supplier default delivery charge (DEODAP_DELIVERY_CHARGE env).
@@ -22,6 +42,8 @@ function payloadForProduct(p,categoryIdValue,exSell,opts={}){const v=p.variants?
  // but NEVER overwrite the admin's edited selling/suggested prices on re-sync.
  delete row.suggested_price;delete row.selling_price}
  // exSell 0/missing = old ₹0-sync bug — row keeps selling/suggested so re-sync heals them.
+ // Stock wapas aane par approved product ko apne aap relist karo.
+ if(ex!==undefined&&!ex.active&&ex.approved)row.active=true;
  return row}
 // PostgREST bulk-upsert requires every object in ONE POST to carry the SAME
 // keys (PGRST102 "All object keys must match"). Price-preserve rows (exSell>0)
@@ -39,7 +61,7 @@ async function upsertBatch(env,supabase,rows){
   if(!r.ok){const text=await r.text();throw new Error(`Supabase DeoDap batch upsert failed (${r.status}): ${text}`);}
  }
 }
-async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price&source=eq.DEODAP");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing DeoDap products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,Number(x.selling_price||0)||0)}return m}
+async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price,active,approved_by_admin&source=eq.DEODAP");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing DeoDap products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,{sell:Number(x.selling_price||0)||0,active:x.active===true,approved:x.approved_by_admin===true})}return m}
 
 export async function syncDeodap(env,supabase,opts={}){
  const perRun=Math.max(1,Math.min(20,Number(env.DEODAP_COLLECTIONS_PER_RUN)||DEFAULT_COLLECTIONS_PER_RUN));
@@ -56,12 +78,13 @@ export async function syncDeodap(env,supabase,opts={}){
  // Owner decision: DeoDap imports carry a ₹199 default delivery charge.
  // DEODAP_DELIVERY_CHARGE env overrides it; applies to newly imported rows only.
  const deodapDc=String(env.DEODAP_DELIVERY_CHARGE??"").trim();
- const importOpts={publish:autoPublish,deliveryCharge:deodapDc===""?199:(Number(deodapDc)||0)};
+ const importOpts={publish:autoPublish,deliveryCharge:deodapDc===""?199:(Number(deodapDc)||0),untrackedStock:Math.max(1,Number(env.DEODAP_DEFAULT_STOCK||25)||25)};
  const dailyHandles=String(env.DEODAP_DAILY_COLLECTIONS||DEFAULT_DAILY_COLLECTIONS.join(",")).split(",").map(x=>x.trim()).filter(Boolean),jewelleryHandles=String(env.DEODAP_JEWELLERY_COLLECTIONS||JEWELLERY_COLLECTIONS.join(",")).split(",").map(x=>x.trim()).filter(Boolean);
  const collections=[...jewelleryHandles.map(handle=>({handle,group:"jewellery"})),...dailyHandles.map(handle=>({handle,group:"daily"}))];
  const startIndex=Math.max(0,Math.floor(Number(opts.cursor)||0));
  const endIndex=Math.min(collections.length,startIndex+perRun);
  const rows={jewellery:[],daily:[]},seen=new Set(),jewelleryIds=new Set();
+ let skippedNoStock=0;
  for(let i=startIndex;i<endIndex;i++){
   const {handle,group}=collections[i];
   let products=[];
@@ -72,7 +95,8 @@ export async function syncDeodap(env,supabase,opts={}){
    if(!id||seen.has(id)||(group==="daily"&&jewelleryIds.has(id)))continue;
    seen.add(id);
    if(group==="jewellery")jewelleryIds.add(id);
-   rows[group].push(payloadForProduct(p,group==="jewellery"?jewelleryId:dailyId,existingPrices.get(id),importOpts));
+   const built=payloadForProduct(p,group==="jewellery"?jewelleryId:dailyId,existingPrices.get(id),importOpts);
+   if(built)rows[group].push(built);else skippedNoStock++;
   }
  }
  const importedRows=[...rows.jewellery,...rows.daily];
@@ -80,5 +104,5 @@ export async function syncDeodap(env,supabase,opts={}){
  const done=endIndex>=collections.length;
  const imported=rows.daily.length+rows.jewellery.length;
  if(!imported&&startIndex===0&&collections.length===0)throw new Error("No DeoDap collections are configured.");
- return{daily:rows.daily.length,jewellery:rows.jewellery.length,imported,auto_publish:autoPublish,done,cursor:done?null:endIndex,warnings,errors:warnings};
+ return{daily:rows.daily.length,jewellery:rows.jewellery.length,imported,skipped_no_stock:skippedNoStock,auto_publish:autoPublish,done,cursor:done?null:endIndex,warnings,errors:warnings};
 }
