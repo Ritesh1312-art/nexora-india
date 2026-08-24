@@ -27,7 +27,18 @@ export async function onRequestPost({request,env}){try{
  if(!(await validAdmin(request,env)))return json({error:"Admin login required"},401);
  if(!env.SUPABASE_URL)return json({error:"SUPABASE_URL is not configured in Cloudflare Pages Functions environment"},500);if(!getSupabaseKey(env))return json({error:"SUPABASE_SECRET_KEY is not configured in Cloudflare Pages Functions environment"},500);try{new URL(env.SUPABASE_URL)}catch{return json({error:"SUPABASE_URL is invalid in Cloudflare Pages Functions environment"},500)}
  if(b.action==="stats"){const checks={products:await readSupabaseResult(await supabase(env,"products?select=id&limit=1")),profiles:await readSupabaseResult(await supabase(env,"profiles?select=id&limit=1")),orders:await readSupabaseResult(await supabase(env,"orders?select=id,total_amount&limit=1"))};const bad=Object.entries(checks).filter(([,x])=>!x.ok);if(bad.length)return json({error:"Supabase query failed",details:bad.map(([name,x])=>({table:name,status:x.status,response:x.data}))},502);const [p,u,o]=await Promise.all([supabase(env,"products?select=id"),supabase(env,"profiles?select=id"),supabase(env,"orders?select=id,total_amount,payment_status")]);const ps=await p.json(),us=await u.json(),os=await o.json();const paid=Array.isArray(os)?os.filter(x=>x.payment_status==="VERIFIED"):[];return json({products:Array.isArray(ps)?ps.length:0,users:Array.isArray(us)?us.length:0,orders:Array.isArray(os)?os.length:0,sales:Number(paid.reduce((s,x)=>s+Number(x.total_amount||0),0).toFixed(2))})}
- if(b.action==="products"){const r=await supabase(env,"products?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase products query failed",details:d},502);return json(d)}
+ if(b.action==="products"){
+ // PostgREST silently caps any single response at ~1000 rows. Admin needs the
+ // FULL catalogue (drafts tab, source filters, purge counts) — paginate.
+ const all=[],page=1000;
+ for(let off=0;off<20000;off+=page){
+  const r=await supabase(env,`products?select=*&order=created_at.desc&limit=${page}&offset=${off}`);
+  const d=await r.json();
+  if(!Array.isArray(d))return json({error:"Supabase products query failed",details:d},502);
+  all.push(...d);if(d.length<page)break;
+ }
+ return json(all)
+}
  if(b.action==="users"){const r=await supabase(env,"profiles?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase profiles query failed",details:d},502);const out=d.map(x=>({...x,email:null,last_sign_in_at:null,banned_until:null}));const auth=await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users?per_page=1000`,{headers:{apikey:getSupabaseKey(env),Authorization:`Bearer ${getSupabaseKey(env)}`,"Content-Type":"application/json"}});if(auth.ok){const ad=await auth.json(),map=new Map((ad.users||[]).map(x=>[x.id,x]));out.forEach(x=>{const a=map.get(x.id);if(a){x.email=a.email||"";x.last_sign_in_at=a.last_sign_in_at||null;x.banned_until=a.banned_until||null}})}return json(out)}
  if(b.action==="orders"){const r=await supabase(env,"orders?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase orders query failed",details:d},502);return json(d)}
  if(b.action==="offers"){const r=await supabase(env,"offers?select=*&order=created_at.desc");const d=await r.json();if(!Array.isArray(d))return json({error:"Supabase offers query failed",details:d},502);const tr=await supabase(env,"offer_targets?select=offer_id,user_id");const td=await tr.json();const map=new Map();if(Array.isArray(td))for(const x of td){if(!map.has(x.offer_id))map.set(x.offer_id,[]);map.get(x.offer_id).push(x.user_id)}return json(d.map(o=>({...o,target_user_ids:map.get(o.id)||[]})))}
