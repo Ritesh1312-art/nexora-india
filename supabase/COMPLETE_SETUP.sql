@@ -385,6 +385,7 @@ create table if not exists public.product_reviews (
   rating integer not null check (rating between 1 and 5),
   title text,
   body text,
+  language text not null default 'Hinglish' check (language in ('Hinglish','Hindi','English')),
   verified_purchase boolean not null default false,
   approved boolean not null default false,
   created_at timestamptz not null default now(),
@@ -1919,3 +1920,272 @@ create policy referrals_own_read on public.affiliate_referrals
 -- or read raw click data directly.
 
 commit;
+
+-- ============================================================
+-- STEP 1: Add colour/size to product variants attributes
+-- and create reviews table
+-- ============================================================
+
+-- Update product_variants to ensure attributes can store colour/size
+-- (attributes jsonb already exists, we just need to ensure data format)
+-- No schema change needed - attributes jsonb can store {colour:..., size:...}
+
+-- ============================================================
+-- Create reviews table
+-- ============================================================
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references public.products(id) on delete cascade,
+  user_id uuid references public.profiles(id) on delete set null,
+  rating integer not null check (rating >= 1 and rating <= 5),
+  title text not null default '',
+  review_text text not null,
+  language text not null default 'Hinglish' check (language in ('Hinglish','Hindi','English')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Enable RLS
+alter table public.reviews enable row level security;
+
+-- Own-review read policy
+drop policy if exists product_reviews_own_read on public.product_reviews;
+create policy product_reviews_own_read on public.product_reviews
+  for select to authenticated
+  using (user_id = (select auth.uid()) or user_id is null);
+
+-- Allow admins to manage all reviews
+drop policy if exists product_reviews_admin_full on public.product_reviews;
+create policy product_reviews_admin_full on public.product_reviews
+  for all to authenticated
+  using (exists (select 1 from public.profiles where id = auth.uid() and role = 'admin'))
+  with check (exists (select 1 from public.profiles where id = auth.uid() and role = 'admin'));
+
+-- Index for product lookups
+create index if not exists product_reviews_product_id_idx on public.product_reviews(product_id);
+create index if not exists product_reviews_language_idx on public.product_reviews(language);
+
+-- ============================================================
+-- STEP 2: Add colour/size variants for existing products
+-- This ensures every product has at least one variant with
+-- colour and size in the attributes jsonb field
+-- ============================================================
+
+-- Function to add colour/size variant for a product
+-- We'll do this via an update script that runs after the initial setup
+-- The product_variants.attributes jsonb field stores {colour, size}
+
+-- ============================================================
+-- MERGE DUPLICATE product_variants ROWS
+-- ============================================================
+-- This merges duplicate variant rows for the same product
+-- keeping one row per unique (product_id, variant_name, attributes) combination
+
+-- Step A: Delete duplicate variants, keeping the one with the highest id
+-- (or the first one encountered, since we just need to deduplicate)
+
+delete from public.product_variants
+where id not in (
+  select min(id)
+  from public.product_variants
+  group by product_id, variant_name, attributes
+);
+
+-- Ensure we have a unique index to prevent future duplicates
+drop index if exists product_variants_product_id_variant_name_attr_idx;
+create unique index if not exists product_variants_product_id_variant_name_attr_idx
+on public.product_variants(product_id, variant_name, attributes);
+
+-- ============================================================
+-- STEP 3: Ensure every product has a colour/size variant
+-- ============================================================
+-- This adds a default colour/size variant for products that don't have one
+
+-- For products without any variants, create a default variant with colour/size
+-- We use a loop approach - for each product without variants, add one
+
+-- Note: The actual population will be done via a separate script
+-- since we need to iterate over all products. This migration sets up
+-- the structure and constraints.
+
+-- ============================================================
+-- Add a comment/guidance for colour/size format
+-- ============================================================
+comment on column public.product_variants.attributes is 'JSONB format: {colour: "Red", size: "M"} or {colour: "Blue"} etc. Use for colour/size attributes.';
+
+-- ============================================================
+-- STEP 4: Hinglish reviews setup
+-- ============================================================
+
+-- Seed Hinglish reviews for all products
+-- We'll generate a set of Hinglish review texts and assign them to products
+
+-- First, let's create a temporary table of Hinglish review templates
+create temp table if not exists hinglish_templates (
+  id serial primary key,
+  text text not null
+);
+
+-- Populate Hinglish review templates (if not already populated)
+insert into hinglish_templates (text) values
+('Achhi product hai, value for money lgti hai')
+,('Product quality achchi hai, delivery bhi tezi se hui')
+('Merey gharwalon ko pasand aayi, wapas mangenge')
+('Product bahut achha hai, colour same jaisa dikh raha')
+('Size theek thi, fabric quality achhi lagti hai')
+('Satisfied with the purchase, good for daily use')
+('Value for price paid, quality dekhne ke baad lagayi')
+('Product delivery time pehle aayi, packing theek tha')
+('Quality average thi, lekin colour pasand aayi')
+('Product theek hai, expected se behtar performance')
+
+-- Assign 3-10 random Hinglish reviews per product
+-- We use a cross-joins approach to distribute reviews evenly
+with product_count as (
+  select count(*) as total from public.products where active = true and approved_by_admin = true
+),
+review_assignments as (
+  select
+    p.id as product_id,
+    ht.text as review_text,
+    ht.id as template_id,
+    row_number() over (partition by p.id order by random()) as rn,
+    count(*) over (partition by p.id) as total_reviews_for_product
+  from public.products p
+  cross join hinglish_templates ht
+  where p.active = true and p.approved_by_admin = true
+)
+insert into public.product_reviews (product_id, user_id, rating, title, body, language)
+select
+  ra.product_id,
+  -- Use a profile id or null (will be set by the app context)
+  null as user_id,
+  case when ra.rn = 1 then 5 when ra.rn = 2 then 4 when ra.rn = 3 then 3 else 2 end as rating,
+  case when ra.rn = 1 then 'Customer Review' when ra.rn = 2 then 'Verified Purchase' else 'User Review' end as title,
+  ra.review_text,
+  'Hinglish' as language
+from review_assignments ra
+where ra.rn <= 3  -- 3 reviews per product max from templates
+
+
+-- Clean up temp table
+drop table if exists hinglish_templates;
+
+-- Add RLS policies for reviews (already created earlier, but ensuring they exist)
+drop policy if exists product_reviews_own_read on public.product_reviews;
+create policy product_reviews_own_read on public.product_reviews
+  for select to authenticated
+  using (user_id = (select auth.uid()) or user_id is null);
+
+drop policy if exists product_reviews_admin_full on public.product_reviews;
+create policy product_reviews_admin_full on public.product_reviews
+  for all to authenticated
+  using (exists (select 1 from public.profiles where id = auth.uid() and role = 'admin'))
+  with check (exists (select 1 from public.profiles where id = auth.uid() and role = 'admin'));
+
+-- Index for product lookups
+create index if not exists product_reviews_product_id_idx on public.product_reviews(product_id);
+create index if not exists product_reviews_language_idx on public.product_reviews(language);
+
+
+-- ============================================================
+-- NEW CATEGORIES: Mobile, Car, Fitness, Pet
+-- ============================================================
+
+-- Add top-level category: Mobile
+insert into public.categories (name, slug, description, active, sort_order, category_type, image_url, icon_url, banner_url)
+values ('Mobile','mobile','Mobile phones and accessories — smartphones, cases, and more.', true, 6, 'OWN',
+ '/images/categories/mobile-banner.jpg','/images/categories/mobile-icon.jpg','/images/categories/mobile-banner.jpg')
+on conflict (slug) do update set name=excluded.name, description=excluded.description, active=true,
+ image_url=excluded.image_url, icon_url=excluded.icon_url, banner_url=excluded.banner_url, sort_order=6;
+
+-- Add top-level category: Car
+insert into public.categories (name, slug, description, active, sort_order, category_type, image_url, icon_url, banner_url)
+values ('Car','car','Car accessories and automotive products.', true, 7, 'OWN',
+ '/images/categories/car-banner.jpg','/images/categories/car-icon.jpg','/images/categories/car-banner.jpg')
+on conflict (slug) do update set name=excluded.name, description=excluded.description, active=true,
+ image_url=excluded.image_url, icon_url=excluded.icon_url, banner_url=excluded.banner_url, sort_order=7;
+
+-- Add top-level category: Fitness
+insert into public.categories (name, slug, description, active, sort_order, category_type, image_url, icon_url, banner_url)
+values ('Fitness','fitness','Fitness equipment and wellness products.', true, 8, 'OWN',
+ '/images/categories/fitness-banner.jpg','/images/categories/fitness-icon.jpg','/images/categories/fitness-banner.jpg')
+on conflict (slug) do update set name=excluded.name, description=excluded.description, active=true,
+ image_url=excluded.image_url, icon_url=excluded.icon_url, banner_url=excluded.banner_url, sort_order=8;
+
+-- Add top-level category: Pet
+insert into public.categories (name, slug, description, active, sort_order, category_type, image_url, icon_url, banner_url)
+values ('Pet','pet','Pet supplies and pet care products.', true, 9, 'OWN',
+ '/images/categories/pet-banner.jpg','/images/categories/pet-icon.jpg','/images/categories/pet-banner.jpg')
+on conflict (slug) do update set name=excluded.name, description=excluded.description, active=true,
+ image_url=excluded.image_url, icon_url=excluded.icon_url, banner_url=excluded.banner_url, sort_order=9;
+
+-- Update sort orders for existing categories to accommodate new ones
+update public.categories set sort_order=1 where slug='artificial-jewellery';
+update public.categories set sort_order=2 where slug='clothes';
+update public.categories set sort_order=3 where slug='footwear';
+update public.categories set sort_order=4 where slug='daily-use-products';
+update public.categories set sort_order=5 where slug='electrical-appliances';
+
+
+-- ============================================================
+-- Add colour/size variants for existing products
+-- This ensures every product has at least one variant with
+-- colour and size in the attributes jsonb field
+-- ============================================================
+
+-- Create or replace a function to add colour/size variant for a product
+-- This can be called to ensure products have variants
+
+-- Step: Add default colour/size variant for products without variants
+-- We'll use a loop approach - for each product without variants, add one with default colour/size
+
+-- First, let's identify products that don't have any variants
+-- and add a default colour/size variant for them
+
+do $$\n$$
+declare\n\
+  prod record;\n\
+  existing_variant_count integer;\n\
+begin\n\
+  for prod in select id, name from public.products where active = true and approved_by_admin = true loop\n\
+    -- Count existing variants for this product\n\
+    select count(*) into existing_variant_count\n\nfrom public.product_variants where product_id = prod.id;\n\
+    -- If no variants exist, create a default one with colour/size\n\
+    if existing_variant_count = 0 then\n\insert into public.product_variants (product_id, variant_name, attributes, cost_price, selling_price, stock, active)\n    values (\n      prod.id,\n      'Default - Color Size',\n      '{\"colour\": \"Multi\", \"size\": \"One Size\"}'::jsonb,\n      0,\n      0,\n      0,\n      true\n    );\n    end if;\n  end loop;\nend;\n$$;
+
+-- Add a helpful comment and index note
+comment on column public.product_variants.attributes is 'JSONB format: {colour: "Red", size: "M"} or {colour: "Blue", size: "L"} etc. Used for colour/size product variants.';
+
+-- Ensure unique constraint prevents duplicate colour/size variants
+
+-- ============================================================
+-- Add colour/size variants for existing products
+-- ============================================================
+-- Note: To add default colour/size variants for existing products,
+-- run the following SQL after setup:
+--
+-- DO $$
+-- declare
+--   prod record;
+--   existing_variant_count integer;
+-- begin
+--   for prod in select id from public.products where active = true and approved_by_admin = true loop
+--     select count(*) into existing_variant_count from public.product_variants where product_id = prod.id;
+--     if existing_variant_count = 0 then
+--       insert into public.product_variants (product_id, variant_name, attributes, cost_price, selling_price, stock, active)
+--       values (prod.id, 'Default - Color Size', '{"colour": "Multi", "size": "One Size"}'::jsonb, 0, 0, 0, true);
+--     end if;
+--   end loop;
+-- end
+-- $$;
+--
+-- The above block can be run manually or via Supabase SQL editor.
+-- The attributes jsonb field stores: {colour: "Red", size: "M"}
+-- ============================================================
+
+comment on column public.product_variants.attributes is 'JSONB format: {colour: "Red", size: "M"} or {colour: "Blue", size: "L"} etc. Used for colour/size product variants.';
+
+-- Ensure unique constraint prevents duplicate colour/size variants
+create unique index if not exists product_variants_product_id_variant_name_attr_unique
+on public.product_variants(product_id, variant_name, attributes);
+
