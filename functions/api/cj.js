@@ -1,143 +1,29 @@
-// CJ authentication: CJ_API_KEY is the source credential; access tokens are generated server-side.
-const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
-// Chunked sync moves the whole catalogue through one keyword "slice" per
-// invocation so a single Cloudflare Pages Function subrequest count stays far
-// below the platform limit (~50). Cursor = keywordIndex*100000 + offset.
-const CURSOR_STEP = 100000;
-
-// USD→INR conversion at sync time. Priority: CJ_USD_INR_RATE env override →
-// live market rate (free FX API, no key) → 90 fallback. An LLM (Gemini etc.)
-// is deliberately NOT used — it cannot quote a reliable current rate.
-async function usdInrRate(env){const override=Number(env.CJ_USD_INR_RATE||0);if(override>0)return override;try{const r=await fetch("https://open.er-api.com/v6/latest/USD",{headers:{Accept:"application/json"}});const d=await r.json().catch(()=>null);const v=Number(d?.rates?.INR);if(r.ok&&v>0)return v}catch{}return 90}
-
-async function requestTokenFromApiKey(apiKey){const r=await fetch(`${CJ_BASE}/authentication/getAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apiKey})});const d=await r.json().catch(()=>({}));if(r.ok&&d.code===200&&d.data?.accessToken)return {accessToken:d.data.accessToken,refreshToken:d.data.refreshToken||null};const code=d.code!=null?`code ${d.code}`:`HTTP ${r.status}`;const e=new Error(`CJ API-key authentication failed (${code}): ${String(d.message||JSON.stringify(d))}`);e.cjCode=d.code;e.requestId=d.requestId;throw e;}
-async function logoutToken(token){if(!token)return;try{await fetch(`${CJ_BASE}/authentication/logout`,{method:"POST",headers:{"CJ-Access-Token":token}});}catch{}}
-async function refreshToken(refreshToken){const r=await fetch(`${CJ_BASE}/authentication/refreshAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({refreshToken})});const d=await r.json().catch(()=>({}));if(r.ok&&d.code===200&&d.data?.accessToken)return d.data.accessToken;return null;}
-async function getAccessToken(env,forceNew=false){const configuredKey=String(env.CJ_API_KEY||"").trim(),configuredAccess=String(env.CJ_ACCESS_TOKEN||"").trim(),configuredRefresh=String(env.CJ_REFRESH_TOKEN||"").trim();if(configuredKey){try{return (await requestTokenFromApiKey(configuredKey)).accessToken}catch(e){if(!configuredRefresh&&!configuredAccess)throw e;}}if(!forceNew&&configuredRefresh){const token=await refreshToken(configuredRefresh);if(token)return token;}if(configuredAccess)return configuredAccess;if(configuredKey)throw new Error("CJ API-key authentication failed. The configured CJ_API_KEY was rejected by CJ.");throw new Error("CJ credentials are missing. Configure CJ_API_KEY or CJ_ACCESS_TOKEN.");}
-function categoryId(categories,aliases){const wanted=aliases.map(x=>x.toLowerCase());return categories.find(c=>wanted.includes(String(c.name||"").trim().toLowerCase()))?.id||null;}
-function textOf(p){return [p.nameEn,p.threeCategoryName,p.twoCategoryName,p.oneCategoryName].filter(Boolean).join(" ").toLowerCase();}
-const GROUPS={footwear:{aliases:["Footwear","Shoes","Footwear Products"],keywords:["shoes","sneakers","sandals","slippers","boots","loafers","heels","flats","running shoes","footwear"]},kitchen:{aliases:["Kitchen Appliances","Kitchen appliance","Kitchen & Home Appliances"],keywords:["kitchen appliance","blender","mixer grinder","mixer","juicer","chopper","air fryer","electric kettle","kettle","toaster","sandwich maker","rice cooker","coffee maker","food processor","induction","electric cooker"]}};
-async function searchProducts(token,keyword,page=1,size=100){const u=new URL(`${CJ_BASE}/product/listV2`);u.searchParams.set("page",String(page));u.searchParams.set("size",String(size));u.searchParams.set("keyWord",keyword);u.searchParams.set("features","enable_category");const r=await fetch(u,{headers:{"CJ-Access-Token":token}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200){const code=d.code!=null?`code ${d.code}`:`HTTP ${r.status}`;const e=new Error(`CJ product query failed for ${keyword} (${code}): ${String(d.message||JSON.stringify(d))}`);e.cjCode=d.code;e.requestId=d.requestId;throw e;}return (d.data?.content||[]).flatMap(x=>x.productList||[]);}
-async function inventoryByProductId(token,pid){const u=new URL(`${CJ_BASE}/product/stock/getInventoryByPid`);u.searchParams.set("pid",String(pid));const r=await fetch(u,{headers:{"CJ-Access-Token":token}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200)return null;const inventories=Array.isArray(d.data?.inventories)?d.data.inventories:[];const totals=inventories.map(x=>Number(x.totalInventoryNum)).filter(Number.isFinite).filter(n=>n>=0);if(totals.length)return Math.max(0,...totals);const variants=Array.isArray(d.data?.variantInventories)?d.data.variantInventories:[];const variantTotals=variants.flatMap(v=>Array.isArray(v.inventory)?v.inventory:[]).map(x=>Number(x.totalInventory)).filter(Number.isFinite).filter(n=>n>=0);return variantTotals.length?Math.max(0,...variantTotals):null;}
-// PostgREST bulk-upsert requires every object in ONE POST to carry the SAME
-// keys (PGRST102 "All object keys must match"). Price-preserve rows (exSell>0)
-// drop the selling/suggested keys while heal/new rows keep them — so rows are
-// grouped by their exact key-set and each group is POSTed separately.
-async function upsertBatch(env,supabase,rows){
- if(!rows.length)return;
- const groups=new Map();
- for(const row of rows){
-  const sig=Object.keys(row).sort().join(" ");
-  const g=groups.get(sig);if(g)g.push(row);else groups.set(sig,[row]);
- }
- for(const group of groups.values()){
-  const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(group)});
-  if(!r.ok){const text=await r.text();throw new Error(`Supabase CJ batch upsert failed (${r.status}): ${text}`);}
- }
-}
-async function getExistingProducts(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price,active,approved_by_admin&source=eq.CJ");const d=await r.json().catch(()=>null);if(!r.ok||!Array.isArray(d))throw new Error(`Could not load existing CJ products before sync: ${JSON.stringify(d)}`);const m=new Map();for(const x of d){const k=String(x.source_product_id||"");if(k&&!m.has(k))m.set(k,{sell:Number(x.selling_price||0)||0,active:x.active===true,approved:x.approved_by_admin===true})}return m;}
-// CJ listV2 prices can arrive as RANGE strings like "34.99--40.99" (variant/MOQ
-// dependent). Number() of that is NaN → cost silently became 0 and products
-// synced at ₹0. parseMoney extracts the first real number from any shape.
+const CJ_BASE="https://developers.cjdropshipping.com/api2.0/v1";
+const CURSOR_STEP=100000;
+async function usdInrRate(env){const o=Number(env.CJ_USD_INR_RATE||0);if(o>0)return o;try{const r=await fetch("https://open.er-api.com/v6/latest/USD");const d=await r.json().catch(()=>null);const v=Number(d?.rates?.INR);if(r.ok&&v>0)return v}catch{}return 90}
+async function requestTokenFromApiKey(k){const r=await fetch(`${CJ_BASE}/authentication/getAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apiKey:k})});const d=await r.json().catch(()=>({}));if(r.ok&&d.code===200&&d.data?.accessToken)return d.data.accessToken;const e=new Error(`CJ API-key authentication failed (${d.code||r.status}): ${String(d.message||JSON.stringify(d))}`);e.cjCode=d.code;throw e}
+async function logoutToken(t){if(!t)return;try{await fetch(`${CJ_BASE}/authentication/logout`,{method:"POST",headers:{"CJ-Access-Token":t}})}catch{}}
+async function refreshToken(t){const r=await fetch(`${CJ_BASE}/authentication/refreshAccessToken`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({refreshToken:t})});const d=await r.json().catch(()=>({}));return r.ok&&d.code===200&&d.data?.accessToken?d.data.accessToken:null}
+async function getAccessToken(env){const k=String(env.CJ_API_KEY||"").trim(),a=String(env.CJ_ACCESS_TOKEN||"").trim(),f=String(env.CJ_REFRESH_TOKEN||"").trim();if(k){try{return await requestTokenFromApiKey(k)}catch(e){if(!a&&!f)throw e}}if(f){const t=await refreshToken(f);if(t)return t}if(a)return a;throw new Error("CJ credentials are missing.")}
+function textOf(p){return [p.nameEn,p.threeCategoryName,p.twoCategoryName,p.oneCategoryName].filter(Boolean).join(" ").toLowerCase()}
+const GROUPS={
+ footwear:{aliases:["Footwear","Shoes","Footwear Products"],keyword:"footwear",match:/\b(shoe|footwear|sneaker|sandal|slipper|boot|loafer|heel|flat|running shoe)\b/i},
+ kitchen:{aliases:["Kitchen Appliances","Kitchen appliance","Kitchen & Home Appliances"],keyword:"kitchen appliance",match:/\b(kitchen|appliance|blender|mixer|juicer|chopper|air fryer|kettle|toaster|sandwich maker|rice cooker|coffee maker|food processor|induction|electric cooker)\b/i},
+ clothes:{aliases:["Clothes","Clothing","Apparel"],keyword:"clothing",match:/\b(clothing|clothes|apparel|shirt|t-shirt|tshirt|top|dress|jeans|trouser|pant|kurti|saree|hoodie|jacket|shorts|skirt|wear)\b/i},
+ fitness:{aliases:["Fitness","Sports & Fitness","Sports and Fitness"],keyword:"fitness",match:/\b(fitness|gym|exercise|workout|sports|yoga|training|resistance|dumbbell|skipping)\b/i},
+ pet:{aliases:["Pet","Pet Supplies","Pet Supplies & Accessories"],keyword:"pet",match:/\b(pet|dog|cat|puppy|kitten|leash|collar|grooming|kennel|aquarium)\b/i}
+};
+function catId(cs,a){const w=a.map(x=>x.toLowerCase());return cs.find(c=>w.includes(String(c.name||"").trim().toLowerCase()))?.id||null}
+function slugId(cs,s){return cs.find(c=>String(c.slug||"").toLowerCase()===s)?.id||null}
+function categoryForProduct(cs,g,t){const main=catId(cs,GROUPS[g].aliases);if(g==="footwear"||g==="clothes"){const b=g;if(/\b(kid|kids|child|children)\b/i.test(t)){const x=slugId(cs,`${b}-kids`);if(x)return x}if(/\b(women|woman|ladies|female)\b/i.test(t)){const x=slugId(cs,`${b}-women`);if(x)return x}if(/\b(men|man|male)\b/i.test(t)){const x=slugId(cs,`${b}-men`);if(x)return x}}return main}
 function parseMoney(v){const m=String(v??"").replace(/,/g,"").match(/\d+(?:\.\d+)?/);return m?Number(m[0]):0}
-function parseCursor(raw){const n=Number(raw||0);if(!Number.isFinite(n)||n<0)return {keywordIndex:0,offset:0};return {keywordIndex:Math.floor(n/CURSOR_STEP),offset:n%CURSOR_STEP};}
-
+function popularity(p,i){const raw=JSON.stringify(p).toLowerCase();let s=500-i;if(/best.?seller|top.?seller|popular|hot|trending|top.?pick|recommended/.test(raw))s+=1000;for(const k of ["salesCount","saleCount","soldCount","orders","orderCount","sold","sales"]){const n=Number(p?.[k]||0);if(Number.isFinite(n)&&n>0)s+=Math.min(1000,Math.log10(n+1)*250)}return s}
+async function searchProducts(t,k,page=1,size=100){const u=new URL(`${CJ_BASE}/product/listV2`);u.searchParams.set("page",String(page));u.searchParams.set("size",String(size));u.searchParams.set("keyWord",k);u.searchParams.set("features","enable_category");const r=await fetch(u,{headers:{"CJ-Access-Token":t}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200){const e=new Error(`CJ product query failed for ${k} (${d.code||r.status})`);e.cjCode=d.code;throw e}return(d.data?.content||[]).flatMap(x=>x.productList||[])}
+async function inventoryByProductId(t,pid){const u=new URL(`${CJ_BASE}/product/stock/getInventoryByPid`);u.searchParams.set("pid",String(pid));const r=await fetch(u,{headers:{"CJ-Access-Token":t}});const d=await r.json().catch(()=>({}));if(!r.ok||d.code!==200)return null;const a=(d.data?.inventories||[]).map(x=>Number(x.totalInventoryNum)).filter(Number.isFinite).filter(n=>n>=0);if(a.length)return Math.max(...a);const b=(d.data?.variantInventories||[]).flatMap(v=>v.inventory||[]).map(x=>Number(x.totalInventory)).filter(Number.isFinite).filter(n=>n>=0);return b.length?Math.max(...b):null}
+async function upsertBatch(env,supabase,rows){if(!rows.length)return;const gs=new Map();for(const r of rows){const s=Object.keys(r).sort().join(" ");if(!gs.has(s))gs.set(s,[]);gs.get(s).push(r)}for(const g of gs.values()){const r=await supabase(env,"products?on_conflict=source,source_product_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(g)});if(!r.ok)throw new Error(`Supabase CJ batch upsert failed (${r.status}): ${await r.text()}`)}}
+async function existing(env,supabase){const r=await supabase(env,"products?select=source_product_id,selling_price,active,approved_by_admin&source=eq.CJ");const d=await r.json();if(!r.ok||!Array.isArray(d))throw new Error("Could not load existing CJ products");const m=new Map();for(const x of d)m.set(String(x.source_product_id),{sell:Number(x.selling_price||0)||0,active:x.active===true,approved:x.approved_by_admin===true});return m}
+function parseCursor(v){const n=Number(v||0);return Number.isFinite(n)&&n>=0?{i:Math.floor(n/CURSOR_STEP)}:{i:0}}
 export async function syncCJ(env,supabase,opts={}){
- // Per-run budgets are env-tunable so the operator can raise/lower the slice
- // size without a deploy. Defaults keep subrequests well under the CF limit.
- const kwPerRun=Math.max(1,Math.min(26,Number(env.CJ_SYNC_KEYWORDS_PER_RUN)||6));
- const invPerRun=Math.max(0,Math.min(20,Number(env.CJ_SYNC_INVENTORY_PER_RUN)||5));
- const maxPerCategory=Math.max(1,Math.min(100,Number(env.CJ_SYNC_MAX_PER_CATEGORY)||40));
- const pageSize=Math.max(10,Math.min(100,Number(env.CJ_SYNC_PAGE_SIZE)||100));
- const queries=[...GROUPS.footwear.keywords.map(keyword=>["footwear",keyword]),...GROUPS.kitchen.keywords.map(keyword=>["kitchen",keyword])];
- const start=parseCursor(opts.cursor);
- const endIndex=Math.min(queries.length,start.keywordIndex+kwPerRun);
- const warnings=[];
- let token=await getAccessToken(env);
- const catRes=await supabase(env,"categories?select=id,name,slug&active=eq.true");
- const categories=await catRes.json();
- if(!Array.isArray(categories))throw new Error(`Could not load store categories: ${JSON.stringify(categories)}`);
- const footwearCategory=categoryId(categories,GROUPS.footwear.aliases),kitchenCategory=categoryId(categories,GROUPS.kitchen.aliases);
- if(!footwearCategory||!kitchenCategory)throw new Error(`CJ category mapping missing. Need Footwear and Kitchen Appliances. Found: ${categories.map(c=>c.name).join(", ")}`);
- const existingPrices=await getExistingProducts(env,supabase);
- let autoPublish=false;
- try{const sr=await supabase(env,"admin_settings?select=auto_publish_products&limit=1");const sd=await sr.json().catch(()=>null);autoPublish=sr.ok&&Array.isArray(sd)&&sd[0]?sd[0].auto_publish_products===true:false}catch{}
- const supplierDeliveryCharge=Number(env.CJ_DELIVERY_CHARGE||0)||0;
- const inrRate=await usdInrRate(env);
- const seen=new Set(),rows={footwear:[],kitchen:[]};
- let inventoryBudget=(opts.light?Math.min(invPerRun,3):invPerRun),skippedNoStock=0,skippedUnverified=0;
- let keywordIndex=start.keywordIndex,offset=start.offset,cursor=null;
- for(;keywordIndex<endIndex;keywordIndex++){
-  const [group,keyword]=queries[keywordIndex];
-  if(rows[group].length>=maxPerCategory){offset=0;continue;}
-  let products=null;
-  try{
-   products=await searchProducts(token,keyword,Math.floor(offset/pageSize)+1,pageSize);
-  }catch(e){
-   // Token expiry (CJ 1600001): one key refresh + retry; any other keyword
-   // failure is tolerated so one bad keyword never kills the whole sync.
-   if(Number(e?.cjCode)===1600001){
-    const key=String(env.CJ_API_KEY||"").trim();
-    if(key){
-     try{await logoutToken(token);token=(await requestTokenFromApiKey(key)).accessToken;products=await searchProducts(token,keyword,Math.floor(offset/pageSize)+1,pageSize);}
-     catch(e2){warnings.push(`${keyword}: ${String(e2?.message||e2)}`);offset=0;continue;}
-    }else{warnings.push(`${keyword}: CJ token expired and no CJ_API_KEY configured`);offset=0;continue;}
-   }
-   warnings.push(`${keyword}: ${String(e?.message||e)}`);offset=0;continue;
-  }
-  for(const p of products){
-   if(rows[group].length>=maxPerCategory)break;
-   const id=p.id||p.productId;
-   if(!id||seen.has(String(id)))continue;
-   const text=textOf(p);
-   const isMatch=group==="footwear"?/(shoe|footwear|sneaker|sandal|slipper|boot|loafer|heel|flat|running shoes)/i.test(text):/(kitchen|appliance|blender|mixer|juicer|chopper|air fryer|kettle|toaster|sandwich maker|rice cooker|coffee maker|food processor|induction|electric cooker)/i.test(text);
-   if(!isMatch)continue;
-   seen.add(String(id));
-   const costUsd=[p.nowPrice,p.discountPrice,p.sellPrice].map(parseMoney).find(n=>n>0)||0,cost=Number((costUsd*inrRate).toFixed(2)),listStock=Math.max(0,Number(p.warehouseInventoryNum||p.totalVerifiedInventory||0)||0),categoryIdValue=group==="footwear"?footwearCategory:kitchenCategory;
-   const payload={name:p.nameEn||"CJ Product",source:"CJ",source_product_id:String(id),source_sku:p.sku||p.spu||null,category_id:categoryIdValue,image_url:p.bigImage||p.productImage||p.imageUrl||null,cost_price:cost,suggested_price:Number((cost*1.5).toFixed(2)),selling_price:Number((cost*1.5).toFixed(2)),stock:listStock,stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};
-   const ex=existingPrices.get(String(id)),isNew=ex===undefined,exSell=ex?ex.sell:undefined;if(isNew){
-    // New supplier products stay unpublished for admin review unless
-    // auto_publish_products is enabled in Store settings.
-    if(autoPublish){payload.active=true;payload.approved_by_admin=true;payload.approved_at=new Date().toISOString()}else{payload.active=false;payload.approved_by_admin=false;}
-    // Optional per-supplier default delivery charge (CJ_DELIVERY_CHARGE env);
-    // applied only to new rows so admin edits are never overwritten.
-    if(supplierDeliveryCharge>0)payload.delivery_charge=supplierDeliveryCharge;
-   }else if(exSell>0){
-    // Existing products with a REAL price: refresh cost/stock/image but NEVER
-    // overwrite the admin's edited selling/suggested prices on re-sync.
-    delete payload.suggested_price;delete payload.selling_price;
-   }
-   // exSell 0/missing = old ₹0-sync bug — payload keeps selling/suggested so
-   // this re-sync heals those rows automatically.
-   // STOCK GATE (owner rule): only products with CONFIRMED supplier stock are
-   // imported/kept. List-level stock first; the per-product inventory API is
-   // consulted only within this run's budget. Unconfirmed = skipped — no
-   // guessing. Existing rows confirmed out-of-stock are auto-delisted into
-   // drafts (site se turant hat jaate hain) and auto-relisted when stock
-   // returns (only if the admin had approved them earlier).
-   let verified=listStock>0?listStock:null;
-   if(verified===null&&inventoryBudget>0){inventoryBudget--;const st=await inventoryByProductId(token,String(id));if(st!==null)verified=Math.max(0,st);}
-   if(verified===null){skippedUnverified++;continue}
-   if(verified<=0){
-    if(isNew){skippedNoStock++;continue}
-    payload.stock=0;
-    if(ex.active)payload.active=false;
-   }else{
-    payload.stock=verified;
-    if(!isNew&&!ex.active&&ex.approved)payload.active=true;
-   }
-   rows[group].push({payload,pid:String(id)});
-  }
-  if(products.length===pageSize&&rows[group].length<maxPerCategory){
-   // Keyword page may have more results — resume on the next page next run.
-   cursor=keywordIndex*100000+offset+products.length;
-   break;
-  }
-  offset=0;
- }
- const all=[...rows.footwear,...rows.kitchen].map(x=>x.payload);
- await upsertBatch(env,supabase,all);
- const done=!cursor&&keywordIndex>=queries.length;
- if(!done&&!cursor)cursor=keywordIndex*100000+0;
- return {footwear:rows.footwear.length,kitchen:rows.kitchen.length,imported:all.length,skipped_no_stock:skippedNoStock,skipped_unverified:skippedUnverified,auto_publish:autoPublish,done,cursor,warnings,errors:warnings};
+ const max=Math.max(1,Math.min(100,Number(env.CJ_SYNC_MAX_PER_CATEGORY)||20)),names=Object.keys(GROUPS),start=parseCursor(opts.cursor),warnings=[],rows=[];let token=await getAccessToken(env);const cr=await supabase(env,"categories?select=id,name,slug&active=eq.true"),cs=await cr.json();if(!Array.isArray(cs))throw new Error("Could not load store categories");for(const g of names)if(!categoryForProduct(cs,g,""))throw new Error(`CJ category mapping missing for ${g}`);const ex=await existing(env,supabase);let auto=false;try{const r=await supabase(env,"admin_settings?select=auto_publish_products&limit=1"),d=await r.json();auto=r.ok&&d?.[0]?.auto_publish_products===true}catch{}const rate=await usdInrRate(env);let i=start.i;for(;i<names.length;i++){const g=names[i],spec=GROUPS[g],seen=new Set(),cand=[];let ps=[];try{ps=await searchProducts(token,spec.keyword,1,100)}catch(e){if(Number(e?.cjCode)===1600001&&env.CJ_API_KEY){try{await logoutToken(token);token=await requestTokenFromApiKey(String(env.CJ_API_KEY).trim());ps=await searchProducts(token,spec.keyword,1,100)}catch(e2){warnings.push(`${g}: ${String(e2?.message||e2)}`);continue}}else{warnings.push(`${g}: ${String(e?.message||e)}`);continue}}ps.forEach((p,n)=>{const id=String(p.id||p.productId||"");if(!id||seen.has(id)||!spec.match.test(textOf(p)))return;seen.add(id);cand.push({p,s:popularity(p,n)})});cand.sort((a,b)=>b.s-a.s);for(const {p} of cand.slice(0,max)){const id=String(p.id||p.productId),t=textOf(p),cid=categoryForProduct(cs,g,t),usd=[p.nowPrice,p.discountPrice,p.sellPrice].map(parseMoney).find(n=>n>0)||0,cost=Number((usd*rate).toFixed(2)),listStock=Math.max(0,Number(p.warehouseInventoryNum||p.totalVerifiedInventory||0)||0),old=ex.get(id),isNew=!old,payload={name:p.nameEn||"CJ Product",source:"CJ",source_product_id:id,source_sku:p.sku||p.spu||null,category_id:cid,image_url:p.bigImage||p.productImage||p.imageUrl||null,cost_price:cost,suggested_price:Number((cost*1.5).toFixed(2)),selling_price:Number((cost*1.5).toFixed(2)),stock:listStock,stock_mode:"AUTO",last_stock_sync_at:new Date().toISOString()};if(isNew){payload.active=auto;payload.approved_by_admin=auto;if(auto)payload.approved_at=new Date().toISOString()}else if(old.sell>0){delete payload.suggested_price;delete payload.selling_price}let stock=listStock>0?listStock:null;if(stock===null)stock=await inventoryByProductId(token,id);if(stock===null||stock<=0){if(isNew)continue;payload.stock=0;if(old.active)payload.active=false}else{payload.stock=stock;if(!isNew&&!old.active&&old.approved)payload.active=true}rows.push(payload)}}if(i<names.length-1)break}
+ await upsertBatch(env,supabase,rows);const counts={footwear:0,kitchen:0,clothes:0,fitness:0,pet:0};for(const r of rows){for(const g of names){if(r.category_id===categoryForProduct(cs,g,"")){counts[g]++;break}}}const done=i>=names.length-1;return {...counts,imported:rows.length,done,cursor:done?null:(i+1)*CURSOR_STEP,warnings,errors:warnings,auto_publish:auto}
 }
