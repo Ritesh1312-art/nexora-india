@@ -1,6 +1,6 @@
 import {json,readBody,supabase,validAdmin,getSupabaseKey} from "./_utils.js";
 import {syncCJRobust} from "./cj-sync-v2.js";
-import {syncDeodap} from "./deodap.js";
+import {syncDeodap, syncDeodapCategory} from "./deodap.js";
 
 const CJ=["Footwear","Kitchen Appliances","Clothes","Fitness","Pet"];
 const DEODAP=["Artificial Jewellery","Daily Use","Car Accessories","Electrical Appliances","Mobile Accessories"];
@@ -16,12 +16,15 @@ export async function onRequestPost({request,env}){
   if(!Number.isInteger(index)||index<0||index>=names.length)return json({error:"Invalid supplier category index"},400);
   const name=names[index],source=index<5?"CJ":"DeoDap";
   try{
-   if(index<5){
-    const r=await syncCJRobust(env,(e,q,o)=>supabase(e,q,o),index);
-    return json({ok:true,name,source,count:Number(r.imported||0),status:"done",warnings:r.warnings||[]});
-   }
-   const r=await syncDeodap(env,(e,q,o)=>supabase(e,q,o),{cursor:(index-5)*100000});
-   return json({ok:true,name,source,count:Number(r.imported||0),status:"done",warnings:r.warnings||[],skipped_no_stock:Number(r.skipped_no_stock||0)});
+   const keyByIndex={0:"footwear",1:"kitchen",2:"clothes",3:"fitness",4:"pet",5:"jewellery",6:"daily",7:"car",8:"electrical",9:"mobile"};
+   const key=keyByIndex[index],dual=new Set(["clothes","fitness","pet","electrical","mobile"]);
+   const results=[],errors=[];
+   const run=async(label,fn)=>{try{const r=await fn();results.push({source:label,result:r});}catch(e){errors.push(`${label}: ${String(e?.message||e)}`)}};
+   if(index<5 || dual.has(key)) await run("CJ",()=>syncCJRobust(env,(e,q,o)=>supabase(e,q,o),key));
+   if(index>=5 || dual.has(key)) await run("DeoDap",()=>syncDeodapCategory(env,(e,q,o)=>supabase(e,q,o),key));
+   const count=results.reduce((n,x)=>n+Number(x.result?.imported||0),0),warnings=results.flatMap(x=>x.result?.warnings||[]).concat(errors);
+   if(count>0)return json({ok:true,name,source:results.map(x=>x.source).join("+"),count,status:"done",warnings});
+   return json({ok:false,name,source,count:0,status:"failed",error:warnings.join(" | ")||"No products imported from configured suppliers",warnings});
   }catch(e){
    return json({ok:false,name,source,count:0,status:"failed",error:String(e?.message||e)},502);
   }
